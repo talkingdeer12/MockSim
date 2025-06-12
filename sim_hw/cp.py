@@ -8,7 +8,7 @@ class ControlProcessor(HardwareModule):
         self.dram = dram
         self.waiting_pes = set()
 
-    def handle_event(self, event):
+    def handle_event_module(self, event):
         if event.event_type == "GEMM":
             print(f"[CP] GEMM 시작: {event.identifier}, shape={event.payload['gemm_shape']}")
             self.waiting_pes = set(pe.name for pe in self.pes)
@@ -31,7 +31,7 @@ class ControlProcessor(HardwareModule):
                 )
                 self.send_event(ctrl_event)
         elif event.event_type == "PE_DONE":
-            pe_name = event.src.name
+            pe_name = event.payload.get("pe_name", event.src.name)
             print(f"[CP] PE 완료 신호 수신: {pe_name}")
             self.waiting_pes.discard(pe_name)
             if not self.waiting_pes:
