@@ -7,22 +7,33 @@ class DRAM(HardwareModule):
 
     def handle_event(self, event):
         if event.event_type == "DMA_WRITE":
-            print(f"[{self.name}] Write 시작: {event.identifier} size={event.data_size} bytes")
             reply_event = Event(
                 src=self,
                 dst=self.get_my_router(),
-                cycle=self.engine.current_cycle + 10,
+                cycle=self.engine.current_cycle + 5,
                 data_size=4,
                 identifier=event.identifier,
                 event_type="WRITE_REPLY",
                 payload={
                     "dst_coords": self.mesh_info["pe_coords"][event.payload["pe_name"]],
-                    "cp_name": event.payload["cp_name"]
-                }
+                    "cp_name": event.payload["cp_name"],
+                },
             )
             self.send_event(reply_event)
         elif event.event_type == "DMA_READ":
-            print(f"[{self.name}] Read 완료: {event.identifier} size={event.data_size} bytes")
+            reply_event = Event(
+                src=self,
+                dst=self.get_my_router(),
+                cycle=self.engine.current_cycle + 5,
+                data_size=4,
+                identifier=event.identifier,
+                event_type="DMA_READ_REPLY",
+                payload={
+                    "dst_coords": self.mesh_info["pe_coords"][event.payload["pe_name"]],
+                    "cp_name": event.payload["cp_name"],
+                },
+            )
+            self.send_event(reply_event)
         else:
             print(f"[{self.name}] 알 수 없는 이벤트: {event.event_type}")
 
