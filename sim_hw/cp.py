@@ -2,8 +2,8 @@ from sim_core.module import HardwareModule
 from sim_core.event import Event
 
 class ControlProcessor(HardwareModule):
-    def __init__(self, engine, name, mesh_info, pes, dram):
-        super().__init__(engine, name, mesh_info)
+    def __init__(self, engine, name, mesh_info, pes, dram, num_stages=0):
+        super().__init__(engine, name, mesh_info, num_stages)
         self.pes = pes
         self.dram = dram
         self.waiting_pes = set()

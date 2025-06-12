@@ -20,6 +20,13 @@ The simulator is built around a few core components:
   * Waits for completion messages before finishing a task.
 * **DRAM** (`sim_hw/dram.py`)
   * Handles DMA read/write events emitted by PEs.
+* **Pipeline support** (`sim_core/module.py`)
+  * `HardwareModule` can be initialised with an arbitrary number of pipeline
+    stages.  Each stage is represented by a `PipelineStage` object which can be
+    subclassed to implement custom behaviour.  Modules raise a global stall flag
+    that all stages check before progressing.  Events generated from pipeline
+    stages are prioritised so that later stages process first within the same
+    cycle.
 
 ## Package Layout
 

@@ -2,8 +2,8 @@ from sim_core.module import HardwareModule
 from sim_core.event import Event
 
 class PE(HardwareModule):
-    def __init__(self, engine, name, mesh_info, mac_units=32, mac_width=32):
-        super().__init__(engine, name, mesh_info)
+    def __init__(self, engine, name, mesh_info, mac_units=32, mac_width=32, num_stages=0):
+        super().__init__(engine, name, mesh_info, num_stages)
         self.mac_units = mac_units
         self.mac_width = mac_width
 

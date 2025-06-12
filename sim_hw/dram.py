@@ -2,8 +2,8 @@ from sim_core.module import HardwareModule
 from sim_core.event import Event
 
 class DRAM(HardwareModule):
-    def __init__(self, engine, name, mesh_info):
-        super().__init__(engine, name, mesh_info)
+    def __init__(self, engine, name, mesh_info, num_stages=0):
+        super().__init__(engine, name, mesh_info, num_stages)
 
     def handle_event(self, event):
         if event.event_type == "DMA_WRITE":
