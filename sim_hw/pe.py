@@ -8,22 +8,74 @@ class PE(HardwareModule):
         self.mac_width = mac_width
 
     def handle_event(self, event):
-        if event.event_type == "PE_CTRL":
+        if event.event_type == "PE_DMA_IN":
+            total_size = event.payload["weights_size"] + event.payload["act_size"]
+            print(f"[{self.name}] DMA_IN 시작: size={total_size} bytes")
+            dram_event = Event(
+                src=self,
+                dst=self.get_my_router(),
+                cycle=self.engine.current_cycle,
+                data_size=total_size,
+                identifier=event.identifier,
+                event_type="DMA_READ",
+                payload={
+                    "dst_coords": self.mesh_info["dram_coords"][event.payload["dram_name"]],
+                    "pe_name": self.name
+                }
+            )
+            self.send_event(dram_event)
+            done_event = Event(
+                src=self,
+                dst=self.get_my_router(),
+                cycle=self.engine.current_cycle + 10,
+                data_size=4,
+                identifier=event.identifier,
+                event_type="PE_DMA_IN_DONE",
+                payload={
+                    "dst_coords": self.mesh_info["cp_coords"][event.payload["cp_name"]],
+                    "gemm_shape": event.payload["gemm_shape"],
+                    "weights_size": event.payload["weights_size"],
+                    "act_size": event.payload["act_size"],
+                    "pe_name": self.name
+                }
+            )
+            self.send_event(done_event)
+
+        elif event.event_type == "PE_GEMM":
             gemm_shape = event.payload["gemm_shape"]
             M, N, K = gemm_shape
             ops = 2 * M * N * K
             latency = (ops + self.mac_units - 1) // self.mac_units
-            print(f"[{self.name}] 연산 시작. (MAC:{self.mac_units}, 연산량:{ops} → {latency} 사이클)")
-
-            dram_write_event = Event(
+            print(f"[{self.name}] GEMM 시작. (MAC:{self.mac_units}, 연산량:{ops} → {latency} 사이클)")
+            done_event = Event(
                 src=self,
                 dst=self.get_my_router(),
                 cycle=self.engine.current_cycle + latency,
-                data_size=event.payload["weights_size"],
+                data_size=4,
+                identifier=event.identifier,
+                event_type="PE_GEMM_DONE",
+                payload={
+                    "dst_coords": self.mesh_info["cp_coords"][event.payload["cp_name"]],
+                    "gemm_shape": gemm_shape,
+                    "weights_size": event.payload["weights_size"],
+                    "act_size": event.payload["act_size"],
+                    "result_size": M * N * 4,
+                    "pe_name": self.name
+                }
+            )
+            self.send_event(done_event)
+
+        elif event.event_type == "PE_DMA_OUT":
+            print(f"[{self.name}] DMA_OUT 시작: size={event.payload['result_size']} bytes")
+            dram_write_event = Event(
+                src=self,
+                dst=self.get_my_router(),
+                cycle=self.engine.current_cycle,
+                data_size=event.payload["result_size"],
                 identifier=event.identifier,
                 event_type="DMA_WRITE",
                 payload={
-                    "dst_coords": self.mesh_info["dram_coords"]["DRAM"],
+                    "dst_coords": self.mesh_info["dram_coords"][event.payload["dram_name"]],
                     "pe_name": self.name,
                     "cp_name": event.payload["cp_name"]
                 }
@@ -37,7 +89,7 @@ class PE(HardwareModule):
                 cycle=self.engine.current_cycle,
                 data_size=4,
                 identifier=event.identifier,
-                event_type="PE_DONE",
+                event_type="PE_DMA_OUT_DONE",
                 payload={
                     "dst_coords": self.mesh_info["cp_coords"][event.payload["cp_name"]],
                     "pe_name": self.name
