@@ -30,7 +30,7 @@ class PE(HardwareModule):
             )
             self.send_event(dram_write_event)
 
-        elif event.event_type == "WRITE_REPLY":
+        elif event.event_type == "DMA_WRITE_REPLY":
             done_event = Event(
                 src=self,
                 dst=self.get_my_router(),
