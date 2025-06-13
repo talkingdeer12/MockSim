@@ -2,11 +2,13 @@ from sim_core.module import HardwareModule
 from sim_core.event import Event
 
 class ControlProcessor(HardwareModule):
-    def __init__(self, engine, name, mesh_info, pes, dram, buffer_capacity=4):
+    def __init__(self, engine, name, mesh_info, pes, dram, npus=None, buffer_capacity=4):
         super().__init__(engine, name, mesh_info, buffer_capacity)
         self.pes = pes
+        self.npus = npus or []
         self.dram = dram
         self.active_gemms = {}
+        self.active_npu_tasks = {}
 
     def handle_event(self, event):
         if event.event_type == "GEMM":
@@ -96,6 +98,92 @@ class ControlProcessor(HardwareModule):
             if not state["waiting_dma_out"]:
                 print(f"[CP] GEMM {event.identifier} 작업 완료")
                 self.active_gemms.pop(event.identifier, None)
+
+        elif event.event_type == "NPU_TASK":
+            state = {
+                "waiting_dma_in": set(npu.name for npu in self.npus),
+                "waiting_task": set(npu.name for npu in self.npus),
+                "waiting_dma_out": set(npu.name for npu in self.npus),
+                "task_cycles": event.payload["task_cycles"],
+                "in_size": event.payload["in_size"],
+                "out_size": event.payload["out_size"],
+            }
+            self.active_npu_tasks[event.identifier] = state
+            for npu in self.npus:
+                dma_evt = Event(
+                    src=self,
+                    dst=self.get_my_router(),
+                    cycle=self.engine.current_cycle,
+                    data_size=state["in_size"],
+                    identifier=event.identifier,
+                    event_type="NPU_DMA_IN",
+                    payload={
+                        "dst_coords": self.mesh_info["npu_coords"][npu.name],
+                        "data_size": state["in_size"],
+                        "cp_name": self.name,
+                        "dram_name": self.dram.name,
+                        "npu_name": npu.name,
+                    },
+                )
+                self.send_event(dma_evt)
+
+        elif event.event_type == "NPU_DMA_IN_DONE":
+            state = self.active_npu_tasks.get(event.identifier)
+            if not state:
+                return
+            npu_name = event.payload["npu_name"]
+            state["waiting_dma_in"].discard(npu_name)
+            if not state["waiting_dma_in"]:
+                for npu in self.npus:
+                    cmd_evt = Event(
+                        src=self,
+                        dst=self.get_my_router(),
+                        cycle=self.engine.current_cycle,
+                        data_size=4,
+                        identifier=event.identifier,
+                        event_type="NPU_CMD",
+                        payload={
+                            "dst_coords": self.mesh_info["npu_coords"][npu.name],
+                            "task_cycles": state["task_cycles"],
+                            "cp_name": self.name,
+                        },
+                    )
+                    self.send_event(cmd_evt)
+
+        elif event.event_type == "NPU_CMD_DONE":
+            state = self.active_npu_tasks.get(event.identifier)
+            if not state:
+                return
+            npu_name = event.payload["npu_name"]
+            state["waiting_task"].discard(npu_name)
+            if not state["waiting_task"]:
+                for npu in self.npus:
+                    dma_evt = Event(
+                        src=self,
+                        dst=self.get_my_router(),
+                        cycle=self.engine.current_cycle,
+                        data_size=state["out_size"],
+                        identifier=event.identifier,
+                        event_type="NPU_DMA_OUT",
+                        payload={
+                            "dst_coords": self.mesh_info["npu_coords"][npu.name],
+                            "data_size": state["out_size"],
+                            "cp_name": self.name,
+                            "dram_name": self.dram.name,
+                            "npu_name": npu.name,
+                        },
+                    )
+                    self.send_event(dma_evt)
+
+        elif event.event_type == "NPU_DMA_OUT_DONE":
+            state = self.active_npu_tasks.get(event.identifier)
+            if not state:
+                return
+            npu_name = event.payload["npu_name"]
+            state["waiting_dma_out"].discard(npu_name)
+            if not state["waiting_dma_out"]:
+                print(f"[CP] NPU task {event.identifier} 완료")
+                self.active_npu_tasks.pop(event.identifier, None)
 
         else:
             super().handle_event(event)
