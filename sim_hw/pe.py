@@ -3,8 +3,8 @@ from sim_core.event import Event
 import random
 
 class PE(PipelineModule):
-    def __init__(self, engine, name, mesh_info, mac_units=32, mac_width=32, pipeline_stages=5):
-        super().__init__(engine, name, mesh_info, pipeline_stages)
+    def __init__(self, engine, name, mesh_info, mac_units=32, mac_width=32, pipeline_stages=5, buffer_capacity=4):
+        super().__init__(engine, name, mesh_info, pipeline_stages, buffer_capacity)
         self.mac_units = mac_units
         self.mac_width = mac_width
         self.expected_dma_reads = {}

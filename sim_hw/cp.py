@@ -2,8 +2,8 @@ from sim_core.module import HardwareModule
 from sim_core.event import Event
 
 class ControlProcessor(HardwareModule):
-    def __init__(self, engine, name, mesh_info, pes, dram):
-        super().__init__(engine, name, mesh_info)
+    def __init__(self, engine, name, mesh_info, pes, dram, buffer_capacity=4):
+        super().__init__(engine, name, mesh_info, buffer_capacity)
         self.pes = pes
         self.dram = dram
         self.active_gemms = {}
@@ -98,7 +98,7 @@ class ControlProcessor(HardwareModule):
                 self.active_gemms.pop(event.identifier, None)
 
         else:
-            print(f"[CP] 알 수 없는 이벤트: {event.event_type}")
+            super().handle_event(event)
 
     def get_my_router(self):
         coords = self.mesh_info["cp_coords"][self.name]

@@ -1,4 +1,6 @@
 import unittest
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from sim_core.engine import SimulatorEngine
 from sim_core.mesh import create_mesh
 from sim_core.event import Event
@@ -16,17 +18,17 @@ class PipelineSimTest(unittest.TestCase):
             "cp_coords": {},
             "dram_coords": {},
         }
-        mesh = create_mesh(engine, 3, 1, mesh_info)
+        mesh = create_mesh(engine, 3, 1, mesh_info, buffer_capacity=1)
         mesh_info["router_map"] = mesh
-        pe = PE(engine, "PE_0", mesh_info)
+        pe = PE(engine, "PE_0", mesh_info, buffer_capacity=1)
         mesh_info["pe_coords"]["PE_0"] = (0,0)
         mesh[(0,0)].attached_module = pe
         engine.register_module(pe)
-        dram = DRAM(engine, "DRAM", mesh_info)
+        dram = DRAM(engine, "DRAM", mesh_info, buffer_capacity=1)
         mesh_info["dram_coords"]["DRAM"] = (1,0)
         mesh[(1,0)].attached_module = dram
         engine.register_module(dram)
-        cp = ControlProcessor(engine, "CP", mesh_info, [pe], dram)
+        cp = ControlProcessor(engine, "CP", mesh_info, [pe], dram, buffer_capacity=1)
         mesh_info["cp_coords"]["CP"] = (2,0)
         mesh[(2,0)].attached_module = cp
         engine.register_module(cp)
