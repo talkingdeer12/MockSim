@@ -13,4 +13,4 @@ class Event:
 
     def handle(self):
         if self.dst is not None:
-            self.dst.handle_event(self)
+            self.dst._process_event(self)

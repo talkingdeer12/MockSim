@@ -2,8 +2,8 @@ from sim_core.module import HardwareModule
 from sim_core.event import Event
 
 class DRAM(HardwareModule):
-    def __init__(self, engine, name, mesh_info):
-        super().__init__(engine, name, mesh_info)
+    def __init__(self, engine, name, mesh_info, buffer_capacity=4):
+        super().__init__(engine, name, mesh_info, buffer_capacity)
 
     def handle_event(self, event):
         if event.event_type == "DMA_WRITE":
@@ -35,7 +35,7 @@ class DRAM(HardwareModule):
             )
             self.send_event(reply_event)
         else:
-            print(f"[{self.name}] 알 수 없는 이벤트: {event.event_type}")
+            super().handle_event(event)
 
     def get_my_router(self):
         coords = self.mesh_info["dram_coords"][self.name]
