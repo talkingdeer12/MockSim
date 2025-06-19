@@ -24,6 +24,25 @@ The simulator is composed of a few key building blocks:
 * **`sim_hw`** – Hardware blocks used by the simulator: control processor, processing elements, an NPU and a DRAM model.
 * **`sim_ml`** – Lightweight PyTorch modules and hooks. `llama3_decoder.py` defines a tiny decoder block and `llama3_sim_hook.py` attaches hooks so `nn.Linear` layers trigger GEMM events.
 
+## Stage Function Templates
+
+Pipeline stage functions can be generated using helpers in
+`sim_core/stage_templates.py`. These utilities return callables matching the
+`PipelineModule` stage signature. The returned function simply passes the input
+to the next stage but includes commented examples for sending or receiving
+events.
+
+```python
+from sim_core.stage_templates import basic_stage_template
+from sim_core.module import PipelineModule
+
+class DummyPipe(PipelineModule):
+    def __init__(self, engine):
+        super().__init__(engine, "Dummy", {}, 2)
+        funcs = [basic_stage_template(i) for i in range(2)]
+        self.set_stage_funcs(funcs)
+```
+
 ## Running the Example
 
 1. Install PyTorch and related packages (CPU-only is fine):
