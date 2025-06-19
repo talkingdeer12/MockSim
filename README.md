@@ -37,7 +37,7 @@ The simulator is composed of a few key building blocks:
    ```bash
    python main.py
    ```
-   The script builds a simple mesh, registers hardware modules and executes a fake decoder block. During the forward pass the hooks inject GEMM events which the simulator processes. After completion a `timeline.png` file is generated visualizing which module processed which events each cycle.
+   The script builds a simple mesh, registers hardware modules and executes a fake decoder block. During the forward pass the hooks inject GEMM events which the simulator processes. After completion a `timeline.png` file is generated visualizing which module processed which events each cycle. The plot now draws horizontal bars for consecutive cycles so overlapping activity across modules is easy to inspect.
 
 ## Testing
 
