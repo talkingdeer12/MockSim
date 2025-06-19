@@ -1,5 +1,6 @@
 from sim_core.engine import SimulatorEngine
 from sim_core.mesh import create_mesh
+from sim_core.logger import EventLogger
 from sim_hw.cp import ControlProcessor
 from sim_hw.pe import PE
 from sim_hw.dram import DRAM
@@ -9,6 +10,8 @@ import torch
 
 def main():
     engine = SimulatorEngine()
+    logger = EventLogger()
+    engine.set_logger(logger)
     x_size, y_size = 3, 2
 
     mesh_info = {
@@ -59,6 +62,7 @@ def main():
     print("===== PyTorch Llama3 Decoder Forward (w/ 하드웨어 시뮬레이터) =====")
     y = block(x)
     engine.run_until_idle()
+    logger.plot('timeline.png')
 
 if __name__ == "__main__":
     main()
