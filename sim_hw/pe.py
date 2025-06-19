@@ -26,12 +26,15 @@ class PE(PipelineModule):
             return data, idx + 1, False
         return func
 
-    def _pipeline_step(self):
-        if self.gemm_cycles_remaining > 0 and not self.stage_queues[0]:
+    def _on_stage_execute(self, idx):
+        if idx == 0 and self.gemm_cycles_remaining > 0 and len(self.stage_queues[0]) < self.stage_capacity:
             self.stage_queues[0].append({})
             self.gemm_cycles_remaining -= 1
-        super()._pipeline_step()
-        if self.gemm_total_cycles and self.gemm_cycles_remaining == 0 and not any(self.stage_queues) and not self.stall:
+        if idx == 0 and (self.gemm_cycles_remaining > 0 or self.stage_queues[0]):
+            self._schedule_stage(0)
+
+    def handle_pipeline_output(self, data):
+        if self.gemm_total_cycles and self.gemm_cycles_remaining == 0 and not any(self.stage_queues):
             evt = Event(
                 src=self,
                 dst=self.get_my_router(),
@@ -48,10 +51,6 @@ class PE(PipelineModule):
             self.gemm_total_cycles = 0
             self.gemm_identifier = None
             self.cp_name = None
-
-    def handle_pipeline_output(self, data):
-        # Nothing to store; completion handled in _pipeline_step
-        pass
 
     def handle_event(self, event):
         if event.event_type == "PE_DMA_IN":
@@ -99,7 +98,7 @@ class PE(PipelineModule):
             self.gemm_total_cycles = cycles
             self.gemm_identifier = event.identifier
             self.cp_name = event.payload["cp_name"]
-            self._schedule_tick()
+            self._schedule_stage(0)
         elif event.event_type == "PE_DMA_OUT":
             total = event.payload["data_size"] // 4
             self.expected_dma_writes[event.identifier] = total
