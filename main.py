@@ -63,6 +63,7 @@ def main():
     y = block(x)
     engine.run_until_idle()
     logger.plot('timeline.png')
+    logger.plot_gantt('timeline.html')
 
 if __name__ == "__main__":
     main()
