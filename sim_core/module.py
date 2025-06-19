@@ -47,7 +47,7 @@ class HardwareModule:
 
 
 class PipelineModule(HardwareModule):
-    """Base class for modules with simple pipelined execution."""
+    """Base class for modules with event driven pipelined execution."""
 
     def __init__(self, engine, name, mesh_info, num_stages, buffer_capacity=4):
         super().__init__(engine, name, mesh_info, buffer_capacity)
@@ -55,10 +55,8 @@ class PipelineModule(HardwareModule):
         self.stage_funcs = [lambda m, d: (d, i + 1, False)
                            for i in range(num_stages)]
         self.stage_queues = [list() for _ in range(num_stages)]
-        self.output_queue = []
-        self.stall = False
-        self.stall_cycles = 0
-        self.tick_scheduled = False
+        self.stage_scheduled = [False for _ in range(num_stages)]
+        self.stage_capacity = buffer_capacity
 
     def set_stage_funcs(self, funcs):
         if len(funcs) != self.num_stages:
@@ -69,58 +67,61 @@ class PipelineModule(HardwareModule):
         if stage_idx >= self.num_stages:
             raise ValueError("stage_idx out of range")
         self.stage_queues[stage_idx].append(data)
-        self._schedule_tick()
+        self._schedule_stage(stage_idx)
 
-    def _schedule_tick(self):
-        if not self.tick_scheduled:
-            evt = Event(src=self, dst=self, cycle=self.engine.current_cycle + 1,
-                        event_type="PIPELINE_TICK", payload={})
+    def _schedule_stage(self, idx):
+        if not self.stage_scheduled[idx]:
+            evt = Event(src=self,
+                        dst=self,
+                        cycle=self.engine.current_cycle + 1,
+                        event_type="PIPE_STAGE",
+                        payload={"stage_idx": idx},
+                        priority=-idx)
             self.send_event(evt)
-            self.tick_scheduled = True
+            self.stage_scheduled[idx] = True
 
     def handle_event(self, event):
-        if event.event_type == "PIPELINE_TICK":
-            self.tick_scheduled = False
-            self._pipeline_step()
+        if event.event_type == "PIPE_STAGE":
+            idx = event.payload["stage_idx"]
+            self.stage_scheduled[idx] = False
+            self._on_stage_execute(idx)
+            self._execute_stage(idx)
         else:
             super().handle_event(event)
 
     def set_stall(self, cycles):
-        self.stall = True
-        self.stall_cycles = max(self.stall_cycles, cycles)
+        # Backwards compatibility for send_event based stalling.
+        pass
 
-    def _pipeline_step(self):
-        if self.stall:
-            if self.stall_cycles > 0:
-                self.stall_cycles -= 1
-            if self.stall_cycles == 0:
-                self.stall = False
-            self._schedule_tick()
+    def _on_stage_execute(self, idx):
+        """Hook called before processing a stage."""
+        pass
+
+    def _execute_stage(self, idx):
+        if not self.stage_queues[idx]:
+            return
+        data = self.stage_queues[idx][0]
+        func = self.stage_funcs[idx]
+        out_data, next_stage, do_stall = func(self, data)
+        if do_stall:
+            self._schedule_stage(idx)
             return
 
-        for idx in reversed(range(self.num_stages)):
-            if not self.stage_queues[idx]:
-                continue
-            data = self.stage_queues[idx][0]
-            func = self.stage_funcs[idx]
-            out_data, next_stage, do_stall = func(self, data)
-            if do_stall:
-                self.set_stall(1)
-                continue
-            self.stage_queues[idx].pop(0)
-            if next_stage >= self.num_stages:
-                self.output_queue.append(out_data)
-            else:
-                self.stage_queues[next_stage].append(out_data)
+        if next_stage < self.num_stages and len(self.stage_queues[next_stage]) >= self.stage_capacity:
+            # downstream stage full - retry later
+            self._schedule_stage(idx)
+            return
 
-        while self.output_queue:
-            item = self.output_queue.pop(0)
-            self.handle_pipeline_output(item)
+        self.stage_queues[idx].pop(0)
 
-        # if there is more data to process or stalled, schedule next tick
-        active = any(self.stage_queues) or self.stall
-        if active:
-            self._schedule_tick()
+        if next_stage >= self.num_stages:
+            self.handle_pipeline_output(out_data)
+        else:
+            self.stage_queues[next_stage].append(out_data)
+            self._schedule_stage(next_stage)
+
+        if self.stage_queues[idx]:
+            self._schedule_stage(idx)
 
     def handle_pipeline_output(self, data):
         pass
