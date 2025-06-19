@@ -5,9 +5,14 @@ class SimulatorEngine:
         self.current_cycle = 0
         self.event_queue = []
         self.modules = {}
+        self.logger = None
     
     def register_module(self, module):
         self.modules[module.name] = module
+
+    def set_logger(self, logger):
+        """Attach an EventLogger instance."""
+        self.logger = logger
 
     def push_event(self, event):
         heapq.heappush(self.event_queue, event)

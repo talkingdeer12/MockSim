@@ -25,6 +25,9 @@ class HardwareModule:
 
     def _process_event(self, event):
         try:
+            if self.engine.logger:
+                stage = event.payload.get('stage_idx', 0) if isinstance(event.payload, dict) else 0
+                self.engine.logger.log_event(self.engine.current_cycle, self.name, stage, event.event_type)
             self.handle_event(event)
         finally:
             self._release_slot()

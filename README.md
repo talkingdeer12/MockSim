@@ -17,6 +17,9 @@ The simulator is composed of a few key building blocks:
   * Coordinates GEMM operations by sending commands to PEs and waits for completion messages.
 * **DRAM** (`sim_hw/dram.py`)
   * Handles DMA read/write events emitted by PEs and NPUs.
+* **Event Logger** (`sim_core/logger.py`)
+  * Records which event types each module handles every cycle and can plot a
+    timeline showing pipeline activity across modules.
 
 ## Package Layout
 
@@ -34,7 +37,7 @@ The simulator is composed of a few key building blocks:
    ```bash
    python main.py
    ```
-   The script builds a simple mesh, registers hardware modules and executes a fake decoder block. During the forward pass the hooks inject GEMM events which the simulator processes.
+   The script builds a simple mesh, registers hardware modules and executes a fake decoder block. During the forward pass the hooks inject GEMM events which the simulator processes. After completion a `timeline.png` file is generated visualizing which module processed which events each cycle.
 
 ## Testing
 
