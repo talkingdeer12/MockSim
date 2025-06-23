@@ -62,8 +62,7 @@ def main():
     print("===== PyTorch Llama3 Decoder Forward (w/ 하드웨어 시뮬레이터) =====")
     y = block(x)
     engine.run_until_idle()
-    logger.plot('timeline.png')
-    logger.plot_interactive('timeline.html')
+    logger.save_html('timeline.html')
 
 if __name__ == "__main__":
     main()

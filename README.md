@@ -37,7 +37,7 @@ The simulator is composed of a few key building blocks:
    ```bash
    python main.py
    ```
-   The script builds a simple mesh, registers hardware modules and executes a fake decoder block. During the forward pass the hooks inject GEMM events which the simulator processes. After completion both a static `timeline.png` and an interactive `timeline.html` are generated. These timelines visualize which module processed which events each cycle and allow hovering over a cycle to inspect all overlapping activity.
+   The script builds a simple mesh, registers hardware modules and executes a fake decoder block. During the forward pass the hooks inject GEMM events which the simulator processes. After completion an interactive `timeline.html` is generated using Plotly. This timeline visualizes which module processed which events each cycle and allows hovering over a cycle to inspect all overlapping activity.
 
 ## Testing
 
