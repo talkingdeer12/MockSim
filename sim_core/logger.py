@@ -25,7 +25,7 @@ class EventLogger:
             return
         try:
             import pandas as pd
-            import plotly.express as px
+            import plotly.figure_factory as ff
             import plotly.graph_objects as go
         except Exception as e:
             print('Plotly not available:', e)
@@ -48,7 +48,8 @@ class EventLogger:
             segments.append({'task': task, 'start': start, 'finish': prev + 1})
 
         seg_df = pd.DataFrame(segments)
-        fig = px.timeline(seg_df, x_start='start', x_end='finish', y='task', color='task')
+        seg_df = seg_df.rename(columns={'task': 'Task', 'start': 'Start', 'finish': 'Finish'})
+        fig = ff.create_gantt(seg_df, index_col='Task', show_colorbar=False, group_tasks=True)
         fig.update_yaxes(autorange='reversed')
 
         events_by_cycle = defaultdict(list)
