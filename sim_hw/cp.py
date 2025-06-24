@@ -107,6 +107,7 @@ class ControlProcessor(HardwareModule):
                 "task_cycles": event.payload["task_cycles"],
                 "in_size": event.payload["in_size"],
                 "out_size": event.payload["out_size"],
+                "dram_cycles": event.payload.get("dram_cycles", 5),
             }
             self.active_npu_tasks[event.identifier] = state
             for npu in self.npus:
@@ -123,6 +124,7 @@ class ControlProcessor(HardwareModule):
                         "cp_name": self.name,
                         "dram_name": self.dram.name,
                         "npu_name": npu.name,
+                        "task_cycles": state["dram_cycles"],
                     },
                 )
                 self.send_event(dma_evt)
@@ -171,6 +173,7 @@ class ControlProcessor(HardwareModule):
                             "cp_name": self.name,
                             "dram_name": self.dram.name,
                             "npu_name": npu.name,
+                            "task_cycles": state["dram_cycles"],
                         },
                     )
                     self.send_event(dma_evt)

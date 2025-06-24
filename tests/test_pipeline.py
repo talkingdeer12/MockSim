@@ -24,7 +24,7 @@ class PipelineSimTest(unittest.TestCase):
         mesh_info["pe_coords"]["PE_0"] = (0,0)
         mesh[(0,0)].attached_module = pe
         engine.register_module(pe)
-        dram = DRAM(engine, "DRAM", mesh_info, buffer_capacity=1)
+        dram = DRAM(engine, "DRAM", mesh_info, pipeline_latency=2, buffer_capacity=1)
         mesh_info["dram_coords"]["DRAM"] = (1,0)
         mesh[(1,0)].attached_module = dram
         engine.register_module(dram)

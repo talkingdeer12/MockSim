@@ -1,41 +1,51 @@
-from sim_core.module import HardwareModule
+from sim_core.module import PipelineModule
 from sim_core.event import Event
 
-class DRAM(HardwareModule):
-    def __init__(self, engine, name, mesh_info, buffer_capacity=4):
-        super().__init__(engine, name, mesh_info, buffer_capacity)
+class DRAM(PipelineModule):
+    """Simple DRAM model with a configurable pipeline latency."""
+
+    def __init__(self, engine, name, mesh_info, pipeline_latency=5, buffer_capacity=4):
+        super().__init__(engine, name, mesh_info, 1, buffer_capacity)
+        self.pipeline_latency = pipeline_latency
+        self.set_stage_funcs([self._stage_func])
+
+    def _stage_func(self, mod, data):
+        data["remaining"] -= 1
+        if data["remaining"] > 0:
+            return data, 0, True
+        return data, 1, False
 
     def handle_event(self, event):
-        if event.event_type == "DMA_WRITE":
-            reply_event = Event(
-                src=self,
-                dst=self.get_my_router(),
-                cycle=self.engine.current_cycle + 5,
-                data_size=4,
-                identifier=event.identifier,
-                event_type="WRITE_REPLY",
-                payload={
-                    "dst_coords": self.mesh_info["pe_coords"][event.payload["pe_name"]],
-                    "cp_name": event.payload["cp_name"],
-                },
-            )
-            self.send_event(reply_event)
-        elif event.event_type == "DMA_READ":
-            reply_event = Event(
-                src=self,
-                dst=self.get_my_router(),
-                cycle=self.engine.current_cycle + 5,
-                data_size=4,
-                identifier=event.identifier,
-                event_type="DMA_READ_REPLY",
-                payload={
-                    "dst_coords": self.mesh_info["pe_coords"][event.payload["pe_name"]],
-                    "cp_name": event.payload["cp_name"],
-                },
-            )
-            self.send_event(reply_event)
+        if event.event_type in ("DMA_WRITE", "DMA_READ"):
+            task = {
+                "type": event.event_type,
+                "identifier": event.identifier,
+                "pe_name": event.payload["pe_name"],
+                "cp_name": event.payload["cp_name"],
+                "remaining": event.payload.get("task_cycles", self.pipeline_latency),
+            }
+            self.add_data(task)
         else:
             super().handle_event(event)
+
+    def handle_pipeline_output(self, task):
+        if task["type"] == "DMA_WRITE":
+            evt_type = "WRITE_REPLY"
+        else:
+            evt_type = "DMA_READ_REPLY"
+        reply_event = Event(
+            src=self,
+            dst=self.get_my_router(),
+            cycle=self.engine.current_cycle,
+            data_size=4,
+            identifier=task["identifier"],
+            event_type=evt_type,
+            payload={
+                "dst_coords": self.mesh_info["pe_coords"][task["pe_name"]],
+                "cp_name": task["cp_name"],
+            },
+        )
+        self.send_event(reply_event)
 
     def get_my_router(self):
         coords = self.mesh_info["dram_coords"][self.name]

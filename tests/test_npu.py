@@ -26,7 +26,7 @@ class NPUTest(unittest.TestCase):
         mesh_info["pe_coords"]["NPU_0"] = (0,0)
         mesh[(0,0)].attached_module = npu
         engine.register_module(npu)
-        dram = DRAM(engine, "DRAM", mesh_info, buffer_capacity=1)
+        dram = DRAM(engine, "DRAM", mesh_info, pipeline_latency=2, buffer_capacity=1)
         mesh_info["dram_coords"]["DRAM"] = (1,0)
         mesh[(1,0)].attached_module = dram
         engine.register_module(dram)
@@ -45,6 +45,7 @@ class NPUTest(unittest.TestCase):
                 "task_cycles": 3,
                 "in_size": 16,
                 "out_size": 16,
+                "dram_cycles": 2,
             },
         )
         cp.send_event(event)
