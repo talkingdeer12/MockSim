@@ -64,6 +64,7 @@ class NPU(PipelineModule):
                         "dst_coords": dram_coords,
                         "pe_name": self.name,
                         "cp_name": event.payload["cp_name"],
+                        "task_cycles": event.payload.get("task_cycles", 5),
                     },
                 )
                 self.send_event(read_evt)
@@ -109,6 +110,7 @@ class NPU(PipelineModule):
                         "dst_coords": dram_coords,
                         "pe_name": self.name,
                         "cp_name": event.payload["cp_name"],
+                        "task_cycles": event.payload.get("task_cycles", 5),
                     },
                 )
                 self.send_event(wr_evt)
