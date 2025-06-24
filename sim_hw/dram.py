@@ -21,8 +21,9 @@ class DRAM(PipelineModule):
                 "type": event.event_type,
                 "identifier": event.identifier,
                 "pe_name": event.payload["pe_name"],
-                "cp_name": event.payload["cp_name"],
                 "remaining": event.payload.get("task_cycles", self.pipeline_latency),
+                "need_reply": event.payload.get("need_reply", False),
+                "reply_coords": event.payload.get("reply_coords"),
             }
             self.add_data(task)
         else:
@@ -42,7 +43,8 @@ class DRAM(PipelineModule):
             event_type=evt_type,
             payload={
                 "dst_coords": self.mesh_info["pe_coords"][task["pe_name"]],
-                "cp_name": task["cp_name"],
+                "need_reply": task.get("need_reply", False),
+                "reply_coords": task.get("reply_coords"),
             },
         )
         self.send_event(reply_event)

@@ -33,9 +33,10 @@ class ControlProcessor(HardwareModule):
                     payload={
                         "dst_coords": self.mesh_info["pe_coords"][pe.name],
                         "data_size": state["weights_size"] + state["act_size"],
-                        "cp_name": self.name,
                         "dram_name": self.dram.name,
                         "pe_name": pe.name,
+                        "need_reply": True,
+                        "reply_coords": self.mesh_info["cp_coords"][self.name],
                     },
                 )
                 self.send_event(dma_evt)
@@ -58,7 +59,8 @@ class ControlProcessor(HardwareModule):
                         payload={
                             "dst_coords": self.mesh_info["pe_coords"][pe.name],
                             "gemm_shape": state["gemm_shape"],
-                            "cp_name": self.name,
+                            "need_reply": True,
+                            "reply_coords": self.mesh_info["cp_coords"][self.name],
                         },
                     )
                     self.send_event(gemm_evt)
@@ -82,9 +84,10 @@ class ControlProcessor(HardwareModule):
                         payload={
                             "dst_coords": self.mesh_info["pe_coords"][pe.name],
                             "data_size": out_size,
-                            "cp_name": self.name,
                             "pe_name": pe.name,
                             "dram_name": self.dram.name,
+                            "need_reply": True,
+                            "reply_coords": self.mesh_info["cp_coords"][self.name],
                         },
                     )
                     self.send_event(dma_evt)
@@ -121,10 +124,11 @@ class ControlProcessor(HardwareModule):
                     payload={
                         "dst_coords": self.mesh_info["npu_coords"][npu.name],
                         "data_size": state["in_size"],
-                        "cp_name": self.name,
                         "dram_name": self.dram.name,
                         "npu_name": npu.name,
                         "task_cycles": state["dram_cycles"],
+                        "need_reply": True,
+                        "reply_coords": self.mesh_info["cp_coords"][self.name],
                     },
                 )
                 self.send_event(dma_evt)
@@ -147,7 +151,8 @@ class ControlProcessor(HardwareModule):
                         payload={
                             "dst_coords": self.mesh_info["npu_coords"][npu.name],
                             "task_cycles": state["task_cycles"],
-                            "cp_name": self.name,
+                            "need_reply": True,
+                            "reply_coords": self.mesh_info["cp_coords"][self.name],
                         },
                     )
                     self.send_event(cmd_evt)
@@ -170,10 +175,11 @@ class ControlProcessor(HardwareModule):
                         payload={
                             "dst_coords": self.mesh_info["npu_coords"][npu.name],
                             "data_size": state["out_size"],
-                            "cp_name": self.name,
                             "dram_name": self.dram.name,
                             "npu_name": npu.name,
                             "task_cycles": state["dram_cycles"],
+                            "need_reply": True,
+                            "reply_coords": self.mesh_info["cp_coords"][self.name],
                         },
                     )
                     self.send_event(dma_evt)

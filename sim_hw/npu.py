@@ -11,7 +11,7 @@ class NPU(PipelineModule):
         self.task_cycles_remaining = 0
         self.task_total_cycles = 0
         self.task_identifier = None
-        self.cp_name = None
+        self.cp_reply_coords = None
         funcs = [self._make_stage_func(i) for i in range(pipeline_stages)]
         self.set_stage_funcs(funcs)
 
@@ -37,14 +37,14 @@ class NPU(PipelineModule):
                 identifier=self.task_identifier,
                 event_type="NPU_CMD_DONE",
                 payload={
-                    "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
+                    "dst_coords": self.cp_reply_coords,
                     "npu_name": self.name,
                 },
             )
             self.send_event(evt)
             self.task_total_cycles = 0
             self.task_identifier = None
-            self.cp_name = None
+            self.cp_reply_coords = None
 
     def handle_event(self, event):
         if event.event_type == "NPU_DMA_IN":
@@ -52,6 +52,7 @@ class NPU(PipelineModule):
             self.expected_dma_reads[event.identifier] = total
             self.received_dma_reads[event.identifier] = 0
             dram_coords = self.mesh_info["dram_coords"][event.payload["dram_name"]]
+            self.cp_reply_coords = event.payload.get("reply_coords")
             for i in range(total):
                 read_evt = Event(
                     src=self,
@@ -63,7 +64,8 @@ class NPU(PipelineModule):
                     payload={
                         "dst_coords": dram_coords,
                         "pe_name": self.name,
-                        "cp_name": event.payload["cp_name"],
+                        "need_reply": True,
+                        "reply_coords": self.mesh_info["npu_coords"][self.name],
                         "task_cycles": event.payload.get("task_cycles", 5),
                     },
                 )
@@ -79,7 +81,7 @@ class NPU(PipelineModule):
                     identifier=event.identifier,
                     event_type="NPU_DMA_IN_DONE",
                     payload={
-                        "dst_coords": self.mesh_info["cp_coords"][event.payload["cp_name"]],
+                        "dst_coords": self.cp_reply_coords,
                         "npu_name": self.name,
                     },
                 )
@@ -91,13 +93,14 @@ class NPU(PipelineModule):
             self.task_cycles_remaining = cycles
             self.task_total_cycles = cycles
             self.task_identifier = event.identifier
-            self.cp_name = event.payload["cp_name"]
+            self.cp_reply_coords = event.payload.get("reply_coords")
             self._schedule_stage(0)
         elif event.event_type == "NPU_DMA_OUT":
             total = event.payload["data_size"] // 4
             self.expected_dma_writes[event.identifier] = total
             self.received_dma_writes[event.identifier] = 0
             dram_coords = self.mesh_info["dram_coords"][event.payload["dram_name"]]
+            self.cp_reply_coords = event.payload.get("reply_coords")
             for i in range(total):
                 wr_evt = Event(
                     src=self,
@@ -109,7 +112,8 @@ class NPU(PipelineModule):
                     payload={
                         "dst_coords": dram_coords,
                         "pe_name": self.name,
-                        "cp_name": event.payload["cp_name"],
+                        "need_reply": True,
+                        "reply_coords": self.mesh_info["npu_coords"][self.name],
                         "task_cycles": event.payload.get("task_cycles", 5),
                     },
                 )
@@ -125,7 +129,7 @@ class NPU(PipelineModule):
                     identifier=event.identifier,
                     event_type="NPU_DMA_OUT_DONE",
                     payload={
-                        "dst_coords": self.mesh_info["cp_coords"][event.payload["cp_name"]],
+                        "dst_coords": self.cp_reply_coords,
                         "npu_name": self.name,
                     },
                 )
