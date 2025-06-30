@@ -45,6 +45,8 @@ class PE(PipelineModule):
                 payload={
                     "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
                     "pe_name": self.name,
+                    "input_port": 0,
+                    "vc": 0,
                 },
             )
             self.send_event(evt)
@@ -71,6 +73,8 @@ class PE(PipelineModule):
                         "dst_coords": dram_coords,
                         "src_name": self.name,
                         "need_reply": True,
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(read_evt)
@@ -87,6 +91,8 @@ class PE(PipelineModule):
                     payload={
                         "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
                         "pe_name": self.name,
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(done_evt)
@@ -118,6 +124,8 @@ class PE(PipelineModule):
                         "dst_coords": dram_coords,
                         "src_name": self.name,
                         "need_reply": True,
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(wr_evt)
@@ -134,6 +142,8 @@ class PE(PipelineModule):
                     payload={
                         "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
                         "pe_name": self.name,
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(done_evt)
