@@ -48,6 +48,8 @@ class DRAM(PipelineModule):
                 event_type=evt_type,
                 payload={
                     "dst_coords": coords,
+                    "input_port": 0,
+                    "vc": 0,
                 },
             )
             self.send_event(reply_event)

@@ -10,17 +10,17 @@ class HardwareModule:
         self.buffer_occupancy = 0
 
     # Credit based buffer bookkeeping
-    def _reserve_slot(self):
+    def _reserve_slot(self, event=None):
         if self.buffer_occupancy >= self.buffer_capacity:
             return False
         self.buffer_occupancy += 1
         return True
 
-    def _release_slot(self):
+    def _release_slot(self, event=None):
         if self.buffer_occupancy > 0:
             self.buffer_occupancy -= 1
 
-    def can_accept_event(self):
+    def can_accept_event(self, event=None):
         return self.buffer_occupancy < self.buffer_capacity
 
     def _process_event(self, event):
@@ -30,7 +30,7 @@ class HardwareModule:
                 self.engine.logger.log_event(self.engine.current_cycle, self.name, stage, event.event_type)
             self.handle_event(event)
         finally:
-            self._release_slot()
+            self._release_slot(event)
 
     def handle_event(self, event):
         if event.event_type == "RETRY_SEND":
@@ -38,7 +38,7 @@ class HardwareModule:
             self.send_event(retry_evt)
 
     def send_event(self, event):
-        if not event.dst._reserve_slot():
+        if not event.dst._reserve_slot(event):
             # Destination buffer full; stall and retry next cycle
             if hasattr(self, "set_stall"):
                 self.set_stall(1)
