@@ -1,17 +1,17 @@
-from .module import HardwareModule
+from .module import PipelineModule
 from .event import Event
 
 DIRS = ["LOCAL", "E", "W", "N", "S"]
 DIR_INDEX = {d: i for i, d in enumerate(DIRS)}
 OPPOSITE = {"E": "W", "W": "E", "N": "S", "S": "N", "LOCAL": "LOCAL"}
 
-class Router(HardwareModule):
+class Router(PipelineModule):
     """Simple high-radix router with virtual-channel based 4-stage pipeline."""
 
     def __init__(self, engine, name, mesh_x, mesh_y, mesh_info,
                  bitwidth=256, pipeline_delay=4,
                  num_ports=5, num_vcs=2, buffer_capacity=4):
-        super().__init__(engine, name, mesh_info, buffer_capacity)
+        super().__init__(engine, name, mesh_info, 4, buffer_capacity)
         self.x = mesh_x
         self.y = mesh_y
         self.bitwidth = bitwidth
@@ -19,18 +19,9 @@ class Router(HardwareModule):
         self.num_ports = num_ports
         self.num_vcs = num_vcs
 
-        # input buffers per [port][vc]
-        self.input_buffers = [[[] for _ in range(num_vcs)]
-                              for _ in range(num_ports)]
+        # buffer occupancy per [port][vc]
         self.buffer_counts = [[0 for _ in range(num_vcs)]
                               for _ in range(num_ports)]
-
-        # pipeline state per input port
-        self.port_stage = [0 for _ in range(num_ports)]  # 0=RC,1=VA,2=SA,3=ST
-        self.port_current_event = [None for _ in range(num_ports)]
-        self.port_current_vc = [None for _ in range(num_ports)]
-        self.port_scheduled = [False for _ in range(num_ports)]
-        self.input_rr = [0 for _ in range(num_ports)]
 
         # output side resources
         self.output_links = [None for _ in range(num_ports)]  # (dst, dst_port)
@@ -41,6 +32,14 @@ class Router(HardwareModule):
 
         self.neighbors = {}
         self.attached_module = None
+
+        funcs = [
+            lambda m, d: Router._stage_rc(m, d),
+            lambda m, d: Router._stage_va(m, d),
+            lambda m, d: Router._stage_sa(m, d),
+            lambda m, d: Router._stage_st(m, d),
+        ]
+        self.set_stage_funcs(funcs)
 
     # ------------------------------------------------------------------
     # basic infrastructure overrides
@@ -84,59 +83,29 @@ class Router(HardwareModule):
         self.output_links[DIR_INDEX["LOCAL"]] = (mod, None)
 
     # ------------------------------------------------------------------
-    def _schedule_port(self, port):
-        if not self.port_scheduled[port]:
-            evt = Event(src=self, dst=self, cycle=self.engine.current_cycle + 1,
-                        event_type="PORT_STAGE", payload={"port": port})
-            self.engine.push_event(evt)
-            self.port_scheduled[port] = True
-
     def handle_event(self, event):
-        if event.event_type == "RETRY_SEND":
+        if event.event_type in ("RETRY_SEND", "PIPE_STAGE"):
             super().handle_event(event)
             return
-        if event.event_type == "PORT_STAGE":
-            port = event.payload["port"]
-            self.port_scheduled[port] = False
-            stage = self.port_stage[port]
-            if stage == 0:
-                self._stage_rc(port)
-            elif stage == 1:
-                self._stage_va(port)
-            elif stage == 2:
-                self._stage_sa(port)
-            else:
-                self._stage_st(port)
-            return
 
-        # normal incoming packet
-        port = event.payload.get("input_port", 0)
-        vc = event.payload.get("vc", 0)
-        self.input_buffers[port][vc].append(event)
-        self._schedule_port(port)
+        # normal incoming packet becomes a pipeline task
+        self.add_data(event, stage_idx=0)
+
+    # Override to avoid buffer checks for internal stage events
+    def _schedule_stage(self, idx):
+        if not self.stage_scheduled[idx]:
+            evt = Event(src=self,
+                        dst=self,
+                        cycle=self.engine.current_cycle + 1,
+                        event_type="PIPE_STAGE",
+                        payload={"stage_idx": idx},
+                        priority=-idx)
+            self.engine.push_event(evt)
+            self.stage_scheduled[idx] = True
 
     # ------------------------------------------------------------------
     # pipeline stage implementations
-    def _select_vc(self, port):
-        for i in range(self.num_vcs):
-            idx = (self.input_rr[port] + i) % self.num_vcs
-            if self.input_buffers[port][idx]:
-                self.input_rr[port] = (idx + 1) % self.num_vcs
-                return idx
-        return None
-
-    def _stage_rc(self, port):
-        if self.port_current_event[port] is None:
-            vc = self._select_vc(port)
-            if vc is None:
-                return  # nothing to process
-            event = self.input_buffers[port][vc][0]
-            self.port_current_event[port] = event
-            self.port_current_vc[port] = vc
-        else:
-            event = self.port_current_event[port]
-            vc = self.port_current_vc[port]
-
+    def _stage_rc(self, event):
         dst_coords = event.payload.get("dst_coords")
         if dst_coords is None:
             raise ValueError(f"[{self.name}] dst_coords missing in payload")
@@ -153,15 +122,8 @@ class Router(HardwareModule):
                 direction = "LOCAL"
         out_port = DIR_INDEX[direction]
         event.payload["out_port"] = out_port
-
-        self.port_stage[port] = 1
-        self._schedule_port(port)
-
-    def _stage_va(self, port):
-        event = self.port_current_event[port]
-        if event is None:
-            self.port_stage[port] = 0
-            return
+        return event, 1, False
+    def _stage_va(self, event):
         out_port = event.payload["out_port"]
         selected_vc = None
         for i in range(self.num_vcs):
@@ -175,35 +137,26 @@ class Router(HardwareModule):
             selected_vc = vc_idx
             break
         if selected_vc is None:
-            self._schedule_port(port)
-            return  # stall
-        self.output_vc_allocation[out_port][selected_vc] = port
+            return event, 1, True  # stall
+        self.output_vc_allocation[out_port][selected_vc] = event
         self.vc_rr[out_port] = (selected_vc + 1) % self.num_vcs
         event.payload["out_vc"] = selected_vc
-        self.port_stage[port] = 2
-        self._schedule_port(port)
+        return event, 2, False
 
-    def _stage_sa(self, port):
-        event = self.port_current_event[port]
-        if event is None:
-            self.port_stage[port] = 0
-            return
+    def _stage_sa(self, event):
         out_port = event.payload["out_port"]
         if self.crossbar_busy[out_port]:
-            self._schedule_port(port)
-            return  # stall
+            return event, 2, True
         self.crossbar_busy[out_port] = True
-        self.port_stage[port] = 3
-        self._schedule_port(port)
+        return event, 3, False
 
-    def _stage_st(self, port):
-        event = self.port_current_event[port]
-        vc = self.port_current_vc[port]
+    def _stage_st(self, event):
+        in_port = event.payload.get("input_port", 0)
+        in_vc = event.payload.get("vc", 0)
         out_port = event.payload["out_port"]
         out_vc = event.payload["out_vc"]
 
         dest, dest_port = self.output_links[out_port]
-        # prepare payload for next hop
         event.payload["input_port"] = dest_port if dest_port is not None else 0
         event.payload["vc"] = out_vc
 
@@ -215,14 +168,8 @@ class Router(HardwareModule):
                           payload=event.payload)
         self.send_event(new_event)
 
-        # remove from buffer and release resources
-        self.input_buffers[port][vc].pop(0)
-        self._release_slot({"input_port": port, "vc": vc})
+        self._release_slot({"input_port": in_port, "vc": in_vc})
         self.output_vc_allocation[out_port][out_vc] = None
         self.crossbar_busy[out_port] = False
 
-        self.port_current_event[port] = None
-        self.port_current_vc[port] = None
-        self.port_stage[port] = 0
-        if any(self.input_buffers[port][i] for i in range(self.num_vcs)):
-            self._schedule_port(port)
+        return event, 4, False
