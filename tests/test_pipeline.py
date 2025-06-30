@@ -22,15 +22,15 @@ class PipelineSimTest(unittest.TestCase):
         mesh_info["router_map"] = mesh
         pe = PE(engine, "PE_0", mesh_info, buffer_capacity=1)
         mesh_info["pe_coords"]["PE_0"] = (0,0)
-        mesh[(0,0)].attached_module = pe
+        mesh[(0,0)].attach_module(pe)
         engine.register_module(pe)
         dram = DRAM(engine, "DRAM", mesh_info, pipeline_latency=2, buffer_capacity=1)
         mesh_info["dram_coords"]["DRAM"] = (1,0)
-        mesh[(1,0)].attached_module = dram
+        mesh[(1,0)].attach_module(dram)
         engine.register_module(dram)
         cp = ControlProcessor(engine, "CP", mesh_info, [pe], dram, buffer_capacity=1)
         mesh_info["cp_coords"]["CP"] = (2,0)
-        mesh[(2,0)].attached_module = cp
+        mesh[(2,0)].attach_module(cp)
         engine.register_module(cp)
 
         gemm_shape = (2,2,2)

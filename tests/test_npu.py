@@ -24,15 +24,15 @@ class NPUTest(unittest.TestCase):
         npu = NPU(engine, "NPU_0", mesh_info, buffer_capacity=1)
         mesh_info["npu_coords"]["NPU_0"] = (0,0)
         mesh_info["pe_coords"]["NPU_0"] = (0,0)
-        mesh[(0,0)].attached_module = npu
+        mesh[(0,0)].attach_module(npu)
         engine.register_module(npu)
         dram = DRAM(engine, "DRAM", mesh_info, pipeline_latency=2, buffer_capacity=1)
         mesh_info["dram_coords"]["DRAM"] = (1,0)
-        mesh[(1,0)].attached_module = dram
+        mesh[(1,0)].attach_module(dram)
         engine.register_module(dram)
         cp = ControlProcessor(engine, "CP", mesh_info, [], dram, npus=[npu], buffer_capacity=1)
         mesh_info["cp_coords"]["CP"] = (2,0)
-        mesh[(2,0)].attached_module = cp
+        mesh[(2,0)].attach_module(cp)
         engine.register_module(cp)
 
         event = Event(

@@ -9,8 +9,8 @@ The simulator is composed of a few key building blocks:
 * **Engine** (`sim_core/engine.py`)
   * Maintains the global cycle counter and delivers queued `Event` objects in timestamp order.
 * **Routers** (`sim_core/router.py`)
-  * Form a 2‑D mesh created via `sim_core/mesh.py`.
-  * Forward events toward destination coordinates and can host a hardware module.
+  * Form a 2-D mesh created via `sim_core/mesh.py`.
+  * Forward events through a 4-stage pipeline using virtual channels.
 * **Processing Elements (PEs)** (`sim_hw/pe.py`)
   * Simulate matrix-multiplication units that communicate with DRAM.
 * **Control Processor (CP)** (`sim_hw/cp.py`)
@@ -49,4 +49,10 @@ Two scenarios are covered:
 
 * **GEMM pipeline** (`tests/test_pipeline.py`) – Validates that a CP can orchestrate GEMM operations across a PE and DRAM, ensuring all DMA and computation events complete.
 * **NPU task flow** (`tests/test_npu.py`) – Exercises an NPU performing a simple task requiring DMA transfers in/out of DRAM. The test confirms the CP tracks completion of the task.
+
+
+## Uniform Traffic Example
+
+Run `examples/uniform_traffic.py` to simulate uniform random traffic on a 16x16 mesh.
+The script reports the average waiting time of delivered packets.
 

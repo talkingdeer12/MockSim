@@ -39,6 +39,8 @@ class NPU(PipelineModule):
                 payload={
                     "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
                     "npu_name": self.name,
+                    "input_port": 0,
+                    "vc": 0,
                 },
             )
             self.send_event(evt)
@@ -66,6 +68,8 @@ class NPU(PipelineModule):
                         "src_name": self.name,
                         "need_reply": True,
                         "task_cycles": event.payload.get("task_cycles", 5),
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(read_evt)
@@ -82,6 +86,8 @@ class NPU(PipelineModule):
                     payload={
                         "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
                         "npu_name": self.name,
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(done_evt)
@@ -113,6 +119,8 @@ class NPU(PipelineModule):
                         "src_name": self.name,
                         "need_reply": True,
                         "task_cycles": event.payload.get("task_cycles", 5),
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(wr_evt)
@@ -129,6 +137,8 @@ class NPU(PipelineModule):
                     payload={
                         "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
                         "npu_name": self.name,
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(done_evt)
