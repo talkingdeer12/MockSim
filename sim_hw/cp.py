@@ -35,6 +35,8 @@ class ControlProcessor(HardwareModule):
                         "data_size": state["weights_size"] + state["act_size"],
                         "src_name": self.name,
                         "need_reply": True,
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(dma_evt)
@@ -59,6 +61,8 @@ class ControlProcessor(HardwareModule):
                             "gemm_shape": state["gemm_shape"],
                             "src_name": self.name,
                             "need_reply": True,
+                            "input_port": 0,
+                            "vc": 0,
                         },
                     )
                     self.send_event(gemm_evt)
@@ -124,6 +128,8 @@ class ControlProcessor(HardwareModule):
                         "src_name": self.name,
                         "need_reply": True,
                         "task_cycles": state["dram_cycles"],
+                        "input_port": 0,
+                        "vc": 0,
                     },
                 )
                 self.send_event(dma_evt)
@@ -148,6 +154,8 @@ class ControlProcessor(HardwareModule):
                             "task_cycles": state["task_cycles"],
                             "src_name": self.name,
                             "need_reply": True,
+                            "input_port": 0,
+                            "vc": 0,
                         },
                     )
                     self.send_event(cmd_evt)
@@ -173,6 +181,8 @@ class ControlProcessor(HardwareModule):
                             "src_name": self.name,
                             "need_reply": True,
                             "task_cycles": state["dram_cycles"],
+                            "input_port": 0,
+                            "vc": 0,
                         },
                     )
                     self.send_event(dma_evt)
