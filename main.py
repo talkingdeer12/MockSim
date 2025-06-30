@@ -37,16 +37,16 @@ def main():
         pe_name = f"PE_{i}"
         mesh_info["pe_coords"][pe_name] = coords
         pe = PE(engine, pe_name, mesh_info)
-        mesh[coords].attached_module = pe
+        mesh[coords].attach_module(pe)
         engine.register_module(pe)
         pes.append(pe)
 
     dram = DRAM(engine, "DRAM", mesh_info)
-    mesh[dram_coords_dict["DRAM"]].attached_module = dram
+    mesh[dram_coords_dict["DRAM"]].attach_module(dram)
     engine.register_module(dram)
 
     cp = ControlProcessor(engine, "CP", mesh_info, pes, dram)
-    mesh[cp_coords_dict["CP"]].attached_module = cp
+    mesh[cp_coords_dict["CP"]].attach_module(cp)
     engine.register_module(cp)
 
     hidden_size = 32
