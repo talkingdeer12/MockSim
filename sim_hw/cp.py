@@ -9,6 +9,11 @@ class ControlProcessor(HardwareModule):
         self.dram = dram
         self.active_gemms = {}
         self.active_npu_tasks = {}
+        # Track completion status for NPU command synchronization so external
+        # modules can query progress of each task.
+        self.npu_dma_in_sync_done = {}
+        self.npu_cmd_sync_done = {}
+        self.npu_dma_out_sync_done = {}
 
     def handle_event(self, event):
         if event.event_type == "GEMM":
@@ -104,6 +109,10 @@ class ControlProcessor(HardwareModule):
                 self.active_gemms.pop(event.identifier, None)
 
         elif event.event_type == "NPU_TASK":
+            # Clear any previous synchronization state for this identifier
+            self.npu_dma_in_sync_done.pop(event.identifier, None)
+            self.npu_cmd_sync_done.pop(event.identifier, None)
+            self.npu_dma_out_sync_done.pop(event.identifier, None)
             state = {
                 "waiting_dma_in": set(npu.name for npu in self.npus),
                 "waiting_task": set(npu.name for npu in self.npus),
@@ -114,6 +123,11 @@ class ControlProcessor(HardwareModule):
                 "dram_cycles": event.payload.get("dram_cycles", 5),
             }
             self.active_npu_tasks[event.identifier] = state
+            # Initialize synchronization flags for this task so that external
+            # observers can poll progress of each command phase.
+            self.npu_dma_in_sync_done[event.identifier] = False
+            self.npu_cmd_sync_done[event.identifier] = False
+            self.npu_dma_out_sync_done[event.identifier] = False
             for npu in self.npus:
                 dma_evt = Event(
                     src=self,
@@ -141,6 +155,7 @@ class ControlProcessor(HardwareModule):
             npu_name = event.payload["npu_name"]
             state["waiting_dma_in"].discard(npu_name)
             if not state["waiting_dma_in"]:
+                self.npu_dma_in_sync_done[event.identifier] = True
                 for npu in self.npus:
                     cmd_evt = Event(
                         src=self,
@@ -167,6 +182,7 @@ class ControlProcessor(HardwareModule):
             npu_name = event.payload["npu_name"]
             state["waiting_task"].discard(npu_name)
             if not state["waiting_task"]:
+                self.npu_cmd_sync_done[event.identifier] = True
                 for npu in self.npus:
                     dma_evt = Event(
                         src=self,
@@ -195,6 +211,7 @@ class ControlProcessor(HardwareModule):
             state["waiting_dma_out"].discard(npu_name)
             if not state["waiting_dma_out"]:
                 print(f"[CP] NPU task {event.identifier} 완료")
+                self.npu_dma_out_sync_done[event.identifier] = True
                 self.active_npu_tasks.pop(event.identifier, None)
 
         else:
