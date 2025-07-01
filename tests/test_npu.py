@@ -52,6 +52,9 @@ class NPUTest(unittest.TestCase):
         engine.run_until_idle(max_tick=500)
         self.assertEqual(len(engine.event_queue), 0)
         self.assertFalse(cp.active_npu_tasks)
+        self.assertTrue(cp.npu_dma_in_sync_done.get("npu_task"))
+        self.assertTrue(cp.npu_cmd_sync_done.get("npu_task"))
+        self.assertTrue(cp.npu_dma_out_sync_done.get("npu_task"))
 
 if __name__ == "__main__":
     unittest.main()
