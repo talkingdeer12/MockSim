@@ -8,6 +8,12 @@ OPPOSITE = {"E": "W", "W": "E", "N": "S", "S": "N", "LOCAL": "LOCAL"}
 class Router(PipelineModule):
     """Simple high-radix router with virtual-channel based 4-stage pipeline."""
 
+    RC = 0
+    VA = 1
+    SA = 2
+    ST = 3
+    STAGE_NAMES = {RC: "RC", VA: "VA", SA: "SA", ST: "ST"}
+
     def __init__(self, engine, name, mesh_x, mesh_y, mesh_info,
                  bitwidth=256, pipeline_delay=4,
                  num_ports=5, num_vcs=2, buffer_capacity=4):
@@ -29,6 +35,7 @@ class Router(PipelineModule):
                                      for _ in range(num_ports)]
         self.vc_rr = [0 for _ in range(num_ports)]
         self.crossbar_busy = [False for _ in range(num_ports)]
+        self.sa_last_grant = -1
 
         self.neighbors = {}
         self.attached_module = None
@@ -41,13 +48,26 @@ class Router(PipelineModule):
         ]
         self.set_stage_funcs(funcs)
 
+        self.on_stage_funcs = [lambda m: None for _ in range(self.num_stages)]
+        self.on_stage_funcs[self.SA] = Router._prep_sa
+
     # ------------------------------------------------------------------
     # basic infrastructure overrides
     def _process_event(self, event):
         """Router delays releasing reserved slot until packet leaves."""
         if self.engine.logger:
-            stage = event.payload.get('stage_idx', 0) if isinstance(event.payload, dict) else 0
-            self.engine.logger.log_event(self.engine.current_cycle, self.name, stage, event.event_type)
+            if isinstance(event.payload, dict):
+                stage_idx = event.payload.get('stage_idx', 0)
+                if stage_idx == self.RC:
+                    port = event.payload.get('input_port', 0)
+                else:
+                    port = event.payload.get('out_port', 0)
+                stage_name = f"P{port}_{self.STAGE_NAMES.get(stage_idx, stage_idx)}"
+            else:
+                stage_name = '0'
+            self.engine.logger.log_event(
+                self.engine.current_cycle, self.name, stage_name, event.event_type
+            )
         self.handle_event(event)
         # no release here; released when packet is forwarded
 
@@ -103,6 +123,39 @@ class Router(PipelineModule):
             self.engine.push_event(evt)
             self.stage_scheduled[idx] = True
 
+    def _on_stage_execute(self, idx):
+        func = self.on_stage_funcs[idx]
+        if func is not None:
+            func(self)
+
+    def _prep_sa(self):
+        if not self.stage_queues[self.SA]:
+            return
+        candidates = {}
+        for i, evt in enumerate(self.stage_queues[self.SA]):
+            out_port = evt.payload.get("out_port")
+            if out_port is None:
+                continue
+            if self.crossbar_busy[out_port]:
+                continue
+            if out_port not in candidates:
+                candidates[out_port] = i
+        if not candidates:
+            return
+        start = (self.sa_last_grant + 1) % self.num_ports
+        selected_port = None
+        for i in range(self.num_ports):
+            port_idx = (start + i) % self.num_ports
+            if port_idx in candidates:
+                selected_port = port_idx
+                break
+        if selected_port is None:
+            selected_port = next(iter(candidates))
+        select_idx = candidates[selected_port]
+        if select_idx != 0:
+            chosen = self.stage_queues[self.SA].pop(select_idx)
+            self.stage_queues[self.SA].insert(0, chosen)
+
     # ------------------------------------------------------------------
     # pipeline stage implementations
     def _stage_rc(self, event):
@@ -122,7 +175,7 @@ class Router(PipelineModule):
                 direction = "LOCAL"
         out_port = DIR_INDEX[direction]
         event.payload["out_port"] = out_port
-        return event, 1, False
+        return event, self.VA, False
     def _stage_va(self, event):
         out_port = event.payload["out_port"]
         selected_vc = None
@@ -137,18 +190,19 @@ class Router(PipelineModule):
             selected_vc = vc_idx
             break
         if selected_vc is None:
-            return event, 1, True  # stall
+            return event, self.VA, True  # stall
         self.output_vc_allocation[out_port][selected_vc] = event
         self.vc_rr[out_port] = (selected_vc + 1) % self.num_vcs
         event.payload["out_vc"] = selected_vc
-        return event, 2, False
+        return event, self.SA, False
 
     def _stage_sa(self, event):
         out_port = event.payload["out_port"]
         if self.crossbar_busy[out_port]:
-            return event, 2, True
+            return event, self.SA, True
         self.crossbar_busy[out_port] = True
-        return event, 3, False
+        self.sa_last_grant = out_port
+        return event, self.ST, False
 
     def _stage_st(self, event):
         in_port = event.payload.get("input_port", 0)
@@ -172,4 +226,4 @@ class Router(PipelineModule):
         self.output_vc_allocation[out_port][out_vc] = None
         self.crossbar_busy[out_port] = False
 
-        return event, 4, False
+        return event, self.ST + 1, False
