@@ -17,25 +17,25 @@ class DRAM(PipelineModule):
 
     def handle_event(self, event):
         if event.event_type in ("DMA_WRITE", "DMA_READ"):
-            task = {
+            op = {
                 "type": event.event_type,
-                "identifier": event.identifier,
+                "program": event.program,
                 "src_name": event.payload["src_name"],
-                "remaining": event.payload.get("task_cycles", self.pipeline_latency),
+                "remaining": event.payload.get("opcode_cycles", self.pipeline_latency),
             }
             if event.payload.get("need_reply"):
-                task["dst_name"] = event.payload["src_name"]
-            self.add_data(task)
+                op["dst_name"] = event.payload["src_name"]
+            self.add_data(op)
         else:
             super().handle_event(event)
 
-    def handle_pipeline_output(self, task):
-        if task["type"] == "DMA_WRITE":
+    def handle_pipeline_output(self, op):
+        if op["type"] == "DMA_WRITE":
             evt_type = "WRITE_REPLY"
         else:
             evt_type = "DMA_READ_REPLY"
-        if "dst_name" in task:
-            dst_name = task["dst_name"]
+        if "dst_name" in op:
+            dst_name = op["dst_name"]
             coords = (self.mesh_info.get("pe_coords", {}).get(dst_name)
                       or self.mesh_info.get("npu_coords", {}).get(dst_name)
                       or self.mesh_info.get("cp_coords", {}).get(dst_name))
@@ -44,7 +44,7 @@ class DRAM(PipelineModule):
                 dst=self.get_my_router(),
                 cycle=self.engine.current_cycle,
                 data_size=4,
-                identifier=task["identifier"],
+                program=op["program"],
                 event_type=evt_type,
                 payload={
                     "dst_coords": coords,

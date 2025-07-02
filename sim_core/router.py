@@ -217,7 +217,7 @@ class Router(PipelineModule):
         new_event = Event(src=self, dst=dest,
                           cycle=self.engine.current_cycle + 1,
                           data_size=event.data_size,
-                          identifier=event.identifier,
+                          program=event.program,
                           event_type=event.event_type,
                           payload=event.payload)
         self.send_event(new_event)
