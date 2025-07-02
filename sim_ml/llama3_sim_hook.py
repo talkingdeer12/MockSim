@@ -14,7 +14,7 @@ def linear_gemm_hook(cp, mesh_info):
             src=None,
             dst=cp,
             cycle=cp.engine.current_cycle + 1,
-            identifier=f"Linear_GEMM_{module.sim_layer_idx}",
+            program=f"Linear_GEMM_{module.sim_layer_idx}",
             event_type="GEMM",
             payload={
                 "gemm_shape": gemm_shape,
