@@ -64,26 +64,32 @@ from sim_core.event import Event
 
 # Schedule the DMA input
 cp.send_event(Event(
-    src=None, dst=cp, cycle=1, identifier="task0", event_type="NPU_DMA_IN",
-    payload={"task_cycles":3, "in_size":16, "out_size":16, "dram_cycles":2}
+    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_DMA_IN",
+    payload={"program_cycles":3, "in_size":16, "out_size":16,
+            "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
+            "cmd_opcode_cycles":3}
 ))
 
 # Compute waits for DMA_IN completion of NPU_0
 cp.send_event(Event(
-    src=None, dst=cp, cycle=1, identifier="task0", event_type="NPU_CMD",
-    payload={"task_cycles":3, "sync_type":0, "sync_targets":["NPU_0"]}
+    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_CMD",
+    payload={"program_cycles":3, "in_size":16, "out_size":16,
+            "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
+            "cmd_opcode_cycles":3, "sync_type":0, "sync_targets":["NPU_0"]}
 ))
 
 # DMA_OUT waits for the CMD phase to finish
 cp.send_event(Event(
-    src=None, dst=cp, cycle=1, identifier="task0", event_type="NPU_DMA_OUT",
-    payload={"task_cycles":3, "sync_type":1, "sync_targets":["NPU_0"]}
+    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_DMA_OUT",
+    payload={"program_cycles":3, "in_size":16, "out_size":16,
+            "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
+            "cmd_opcode_cycles":3, "sync_type":1, "sync_targets":["NPU_0"]}
 ))
 
 engine.run_until_idle()
 ```
 
-After the engine idles you can query `cp.npu_dma_in_sync_done['task0']`, `cp.npu_cmd_sync_done['task0']` and `cp.npu_dma_out_sync_done['task0']` to confirm each phase finished.
+After the engine idles you can query `cp.npu_dma_in_program_done['prog0']`, `cp.npu_cmd_program_done['prog0']` and `cp.npu_dma_out_program_done['prog0']` to confirm each phase finished.
 
 
 ## Uniform Traffic Example

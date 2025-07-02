@@ -38,7 +38,7 @@ class PipelineSimTest(unittest.TestCase):
             src=None,
             dst=cp,
             cycle=1,
-            identifier="test_gemm",
+            program="test_gemm",
             event_type="GEMM",
             payload={
                 "gemm_shape": gemm_shape,

@@ -35,18 +35,22 @@ class NPUTest(unittest.TestCase):
         mesh[(2,0)].attach_module(cp)
         engine.register_module(cp)
 
+        program_cfg = {
+            "program_cycles": 3,
+            "in_size": 16,
+            "out_size": 16,
+            "dma_in_opcode_cycles": 2,
+            "dma_out_opcode_cycles": 2,
+            "cmd_opcode_cycles": 3,
+        }
+
         dma_in_evt = Event(
             src=None,
             dst=cp,
             cycle=1,
-            identifier="npu_task",
+            program="npu_prog",
             event_type="NPU_DMA_IN",
-            payload={
-                "task_cycles": 3,
-                "in_size": 16,
-                "out_size": 16,
-                "dram_cycles": 2,
-            },
+            payload=program_cfg,
         )
         cp.send_event(dma_in_evt)
 
@@ -54,13 +58,10 @@ class NPUTest(unittest.TestCase):
             src=None,
             dst=cp,
             cycle=engine.current_cycle,
-            identifier="npu_task",
+            program="npu_prog",
             event_type="NPU_CMD",
             payload={
-                "task_cycles": 3,
-                "in_size": 16,
-                "out_size": 16,
-                "dram_cycles": 2,
+                **program_cfg,
                 "sync_type": 0,
                 "sync_targets": ["NPU_0"],
             },
@@ -71,13 +72,10 @@ class NPUTest(unittest.TestCase):
             src=None,
             dst=cp,
             cycle=engine.current_cycle,
-            identifier="npu_task",
+            program="npu_prog",
             event_type="NPU_DMA_OUT",
             payload={
-                "task_cycles": 3,
-                "in_size": 16,
-                "out_size": 16,
-                "dram_cycles": 2,
+                **program_cfg,
                 "sync_type": 1,
                 "sync_targets": ["NPU_0"],
             },
@@ -85,11 +83,11 @@ class NPUTest(unittest.TestCase):
         cp.send_event(out_evt)
 
         engine.run_until_idle(max_tick=500)
-        self.assertTrue(cp.npu_dma_in_sync_done.get("npu_task"))
-        self.assertTrue(cp.npu_cmd_sync_done.get("npu_task"))
+        self.assertTrue(cp.npu_dma_in_program_done.get("npu_prog"))
+        self.assertTrue(cp.npu_cmd_program_done.get("npu_prog"))
         self.assertEqual(len(engine.event_queue), 0)
-        self.assertFalse(cp.active_npu_tasks)
-        self.assertTrue(cp.npu_dma_out_sync_done.get("npu_task"))
+        self.assertFalse(cp.active_npu_programs)
+        self.assertTrue(cp.npu_dma_out_program_done.get("npu_prog"))
 
 if __name__ == "__main__":
     unittest.main()
