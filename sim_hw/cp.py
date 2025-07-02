@@ -9,6 +9,53 @@ class ControlProcessor(HardwareModule):
         self.dram = dram
         self.active_gemms = {}
         self.active_npu_tasks = {}
+        # Track synchronization state of NPU commands so external modules can
+        # poll progress.  Each dict maps an identifier to a boolean flag.
+        self.npu_dma_in_sync_done = {}
+        self.npu_cmd_sync_done = {}
+        self.npu_dma_out_sync_done = {}
+
+    def _is_sync_ready(self, identifier, sync_type, targets=None):
+        """Return True if the given sync type has completed for ``identifier``.
+
+        ``targets`` may be an iterable of NPU names to check. If ``None`` it
+        checks all NPUs involved in the task.
+        """
+        state = self.active_npu_tasks.get(identifier)
+        if not state:
+            return True
+
+        if sync_type == 0:
+            pending = state["waiting_dma_in"]
+        elif sync_type == 1:
+            pending = state["waiting_task"]
+        else:
+            pending = state["waiting_dma_out"]
+
+        if targets is None:
+            return not pending
+        return not pending.intersection(targets)
+
+    def _gate_by_sync(self, event):
+        """Reschedule ``event`` if its ``sync_type`` dependency isn't ready."""
+        sync_type = event.payload.get("sync_type")
+        if sync_type is None:
+            return False
+
+        targets = event.payload.get("sync_targets")
+        if not self._is_sync_ready(event.identifier, sync_type, targets):
+            retry_evt = Event(
+                src=self,
+                dst=self,
+                cycle=self.engine.current_cycle + 1,
+                data_size=0,
+                identifier=event.identifier,
+                event_type=event.event_type,
+                payload=event.payload,
+            )
+            self.send_event(retry_evt)
+            return True
+        return False
 
     def handle_event(self, event):
         if event.event_type == "GEMM":
@@ -103,17 +150,24 @@ class ControlProcessor(HardwareModule):
                 print(f"[CP] GEMM {event.identifier} 작업 완료")
                 self.active_gemms.pop(event.identifier, None)
 
-        elif event.event_type == "NPU_TASK":
+        elif event.event_type == "NPU_DMA_IN":
+            if self._gate_by_sync(event):
+                return
+
+            # (Re)initialize state for this identifier
             state = {
-                "waiting_dma_in": set(npu.name for npu in self.npus),
-                "waiting_task": set(npu.name for npu in self.npus),
-                "waiting_dma_out": set(npu.name for npu in self.npus),
+                "waiting_dma_in": set(n.name for n in self.npus),
+                "waiting_task": set(n.name for n in self.npus),
+                "waiting_dma_out": set(n.name for n in self.npus),
                 "task_cycles": event.payload["task_cycles"],
                 "in_size": event.payload["in_size"],
                 "out_size": event.payload["out_size"],
                 "dram_cycles": event.payload.get("dram_cycles", 5),
             }
             self.active_npu_tasks[event.identifier] = state
+            self.npu_dma_in_sync_done[event.identifier] = False
+            self.npu_cmd_sync_done.setdefault(event.identifier, True)
+            self.npu_dma_out_sync_done.setdefault(event.identifier, True)
             for npu in self.npus:
                 dma_evt = Event(
                     src=self,
@@ -134,6 +188,64 @@ class ControlProcessor(HardwareModule):
                 )
                 self.send_event(dma_evt)
 
+        elif event.event_type == "NPU_CMD":
+            if self._gate_by_sync(event):
+                return
+
+            state = self.active_npu_tasks.get(event.identifier)
+            if not state:
+                return
+            state["waiting_task"] = set(n.name for n in self.npus)
+            self.npu_cmd_sync_done[event.identifier] = False
+            for npu in self.npus:
+                cmd_evt = Event(
+                    src=self,
+                    dst=self.get_my_router(),
+                    cycle=self.engine.current_cycle,
+                    data_size=4,
+                    identifier=event.identifier,
+                    event_type="NPU_CMD",
+                    payload={
+                        "dst_coords": self.mesh_info["npu_coords"][npu.name],
+                        "task_cycles": state["task_cycles"],
+                        "src_name": self.name,
+                        "need_reply": True,
+                        "input_port": 0,
+                        "vc": 0,
+                    },
+                )
+                self.send_event(cmd_evt)
+
+        elif event.event_type == "NPU_DMA_OUT":
+            if self._gate_by_sync(event):
+                return
+
+            state = self.active_npu_tasks.get(event.identifier)
+            if not state:
+                return
+            state["waiting_dma_out"] = set(n.name for n in self.npus)
+            self.npu_dma_out_sync_done[event.identifier] = False
+            for npu in self.npus:
+                out_evt = Event(
+                    src=self,
+                    dst=self.get_my_router(),
+                    cycle=self.engine.current_cycle,
+                    data_size=state["out_size"],
+                    identifier=event.identifier,
+                    event_type="NPU_DMA_OUT",
+                    payload={
+                        "dst_coords": self.mesh_info["npu_coords"][npu.name],
+                        "data_size": state["out_size"],
+                        "src_name": self.name,
+                        "need_reply": True,
+                        "task_cycles": state["dram_cycles"],
+                        "input_port": 0,
+                        "vc": 0,
+                    },
+                )
+                self.send_event(out_evt)
+
+
         elif event.event_type == "NPU_DMA_IN_DONE":
             state = self.active_npu_tasks.get(event.identifier)
             if not state:
@@ -141,24 +253,8 @@ class ControlProcessor(HardwareModule):
             npu_name = event.payload["npu_name"]
             state["waiting_dma_in"].discard(npu_name)
             if not state["waiting_dma_in"]:
-                for npu in self.npus:
-                    cmd_evt = Event(
-                        src=self,
-                        dst=self.get_my_router(),
-                        cycle=self.engine.current_cycle,
-                        data_size=4,
-                        identifier=event.identifier,
-                        event_type="NPU_CMD",
-                        payload={
-                            "dst_coords": self.mesh_info["npu_coords"][npu.name],
-                            "task_cycles": state["task_cycles"],
-                            "src_name": self.name,
-                            "need_reply": True,
-                            "input_port": 0,
-                            "vc": 0,
-                        },
-                    )
-                    self.send_event(cmd_evt)
+                # Mark completion so external modules can trigger the next phase
+                self.npu_dma_in_sync_done[event.identifier] = True
 
         elif event.event_type == "NPU_CMD_DONE":
             state = self.active_npu_tasks.get(event.identifier)
@@ -167,25 +263,8 @@ class ControlProcessor(HardwareModule):
             npu_name = event.payload["npu_name"]
             state["waiting_task"].discard(npu_name)
             if not state["waiting_task"]:
-                for npu in self.npus:
-                    dma_evt = Event(
-                        src=self,
-                        dst=self.get_my_router(),
-                        cycle=self.engine.current_cycle,
-                        data_size=state["out_size"],
-                        identifier=event.identifier,
-                        event_type="NPU_DMA_OUT",
-                        payload={
-                            "dst_coords": self.mesh_info["npu_coords"][npu.name],
-                            "data_size": state["out_size"],
-                            "src_name": self.name,
-                            "need_reply": True,
-                            "task_cycles": state["dram_cycles"],
-                            "input_port": 0,
-                            "vc": 0,
-                        },
-                    )
-                    self.send_event(dma_evt)
+                # Command phase finished
+                self.npu_cmd_sync_done[event.identifier] = True
 
         elif event.event_type == "NPU_DMA_OUT_DONE":
             state = self.active_npu_tasks.get(event.identifier)
@@ -195,6 +274,7 @@ class ControlProcessor(HardwareModule):
             state["waiting_dma_out"].discard(npu_name)
             if not state["waiting_dma_out"]:
                 print(f"[CP] NPU task {event.identifier} 완료")
+                self.npu_dma_out_sync_done[event.identifier] = True
                 self.active_npu_tasks.pop(event.identifier, None)
 
         else:

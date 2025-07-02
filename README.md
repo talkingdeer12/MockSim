@@ -48,7 +48,42 @@ python -m unittest discover tests
 Two scenarios are covered:
 
 * **GEMM pipeline** (`tests/test_pipeline.py`) – Validates that a CP can orchestrate GEMM operations across a PE and DRAM, ensuring all DMA and computation events complete.
-* **NPU task flow** (`tests/test_npu.py`) – Exercises an NPU performing a simple task requiring DMA transfers in/out of DRAM. The test confirms the CP tracks completion of the task.
+* **NPU task flow** (`tests/test_npu.py`) – Drives the new CP logic for coordinating NPUs. It issues DMA in, compute and DMA out events that depend on the completion of prior phases.
+
+## NPU Task Example
+
+The control processor exposes synchronization flags so higher level code can sequence NPU commands.  Each event to the CP may specify:
+
+* `sync_type` – Which previous phase to wait for (`0` = DMA_IN, `1` = CMD, `2` = DMA_OUT).
+* `sync_targets` – Iterable of NPU names that must have reported `_DONE` for the given phase before this event will issue.
+
+Below is a minimal example replicating `tests/test_npu.py`:
+
+```python
+from sim_core.event import Event
+
+# Schedule the DMA input
+cp.send_event(Event(
+    src=None, dst=cp, cycle=1, identifier="task0", event_type="NPU_DMA_IN",
+    payload={"task_cycles":3, "in_size":16, "out_size":16, "dram_cycles":2}
+))
+
+# Compute waits for DMA_IN completion of NPU_0
+cp.send_event(Event(
+    src=None, dst=cp, cycle=1, identifier="task0", event_type="NPU_CMD",
+    payload={"task_cycles":3, "sync_type":0, "sync_targets":["NPU_0"]}
+))
+
+# DMA_OUT waits for the CMD phase to finish
+cp.send_event(Event(
+    src=None, dst=cp, cycle=1, identifier="task0", event_type="NPU_DMA_OUT",
+    payload={"task_cycles":3, "sync_type":1, "sync_targets":["NPU_0"]}
+))
+
+engine.run_until_idle()
+```
+
+After the engine idles you can query `cp.npu_dma_in_sync_done['task0']`, `cp.npu_cmd_sync_done['task0']` and `cp.npu_dma_out_sync_done['task0']` to confirm each phase finished.
 
 
 ## Uniform Traffic Example
