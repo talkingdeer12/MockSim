@@ -12,6 +12,7 @@ class NPU(PipelineModule):
         self.opcode_total_cycles = 0
         self.program_identifier = None
         self.cp_name = None
+        self.cmd_need_reply = False
         funcs = [self._make_stage_func(i) for i in range(pipeline_stages)]
         self.set_stage_funcs(funcs)
 
@@ -21,14 +22,16 @@ class NPU(PipelineModule):
         return func
 
     def _on_stage_execute(self, idx):
-        if idx == 0 and self.opcode_cycles_remaining > 0 and len(self.stage_queues[0]) < self.stage_capacity:
-            self.stage_queues[0].append({})
-            self.opcode_cycles_remaining -= 1
-        if idx == 0 and (self.opcode_cycles_remaining > 0 or self.stage_queues[0]):
-            self._schedule_stage(0)
+        """Hook called before executing a pipeline stage."""
+        pass
 
     def handle_pipeline_output(self, data):
-        if self.opcode_total_cycles and self.opcode_cycles_remaining == 0 and not any(self.stage_queues):
+        if not self.opcode_total_cycles:
+            return
+
+        self.opcode_cycles_remaining -= 1
+        if self.opcode_cycles_remaining == 0:
+            dst_name = data.get("dst_name", self.cp_name)
             evt = Event(
                 src=self,
                 dst=self.get_my_router(),
@@ -37,7 +40,7 @@ class NPU(PipelineModule):
                 program=self.program_identifier,
                 event_type="NPU_CMD_DONE",
                 payload={
-                    "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
+                    "dst_coords": self.mesh_info["cp_coords"][dst_name],
                     "npu_name": self.name,
                     "input_port": 0,
                     "vc": 0,
@@ -47,6 +50,7 @@ class NPU(PipelineModule):
             self.opcode_total_cycles = 0
             self.program_identifier = None
             self.cp_name = None
+            self.cmd_need_reply = False
 
     def handle_event(self, event):
         if event.event_type == "NPU_DMA_IN":
@@ -99,7 +103,13 @@ class NPU(PipelineModule):
             self.opcode_total_cycles = cycles
             self.program_identifier = event.program
             self.cp_name = event.payload["src_name"]
-            self._schedule_stage(0)
+            need_reply = event.payload.get("need_reply", False)
+            for _ in range(cycles):
+                token = {}
+                if need_reply:
+                    token["dst_name"] = self.cp_name
+                self.add_data(token, stage_idx=0)
+            self.cmd_need_reply = need_reply
         elif event.event_type == "NPU_DMA_OUT":
             total = event.payload["data_size"] // 4
             self.expected_dma_writes[event.program] = total
