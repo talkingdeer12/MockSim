@@ -20,6 +20,9 @@ class ControlProcessor(HardwareModule):
         # events scheduled in the same cycle as the *_DONE that released the
         # sync are still blocked.
         self.npu_sync_wait = {}
+        # Store control programs and per-program execution state
+        self.program_store = {}
+        self.program_state = {}
 
     def _create_program_state(self, payload):
         return {
@@ -33,6 +36,11 @@ class ControlProcessor(HardwareModule):
             "dma_out_opcode_cycles": payload.get("dma_out_opcode_cycles", 5),
             "cmd_opcode_cycles": payload.get("cmd_opcode_cycles", payload["program_cycles"]),
         }
+
+    def load_program(self, name, instructions):
+        """Register a list of instructions for sequential execution."""
+        self.program_store[name] = instructions
+        self.program_state[name] = {"pc": 0, "waiting": False}
 
     def _gate_by_npu_sync(self, event):
         """Delay NPU events while a sync is active for its program."""
@@ -68,6 +76,36 @@ class ControlProcessor(HardwareModule):
 
 
     def handle_event(self, event):
+        if event.event_type == "RUN_PROGRAM":
+            prog = self.program_store.get(event.program)
+            state = self.program_state.get(event.program)
+            if not prog or not state or state["pc"] >= len(prog):
+                return
+            if state.get("waiting"):
+                retry = Event(src=self, dst=self,
+                              cycle=self.engine.current_cycle + 1,
+                              program=event.program,
+                              event_type="RUN_PROGRAM")
+                self.engine.push_event(retry)
+                return
+            instr = prog[state["pc"]]
+            state["pc"] += 1
+            if instr["event_type"] == "NPU_SYNC":
+                state["waiting"] = True
+            instr_evt = Event(src=None, dst=self,
+                              cycle=self.engine.current_cycle,
+                              program=event.program,
+                              event_type=instr["event_type"],
+                              payload=instr.get("payload", {}))
+            self.engine.push_event(instr_evt)
+            if state["pc"] < len(prog) or state.get("waiting"):
+                nxt = Event(src=self, dst=self,
+                            cycle=self.engine.current_cycle + 1,
+                            program=event.program,
+                            event_type="RUN_PROGRAM")
+                self.engine.push_event(nxt)
+            return
+
         if event.event_type == "GEMM":
             print(f"[CP] GEMM 시작: {event.program}, shape={event.payload['gemm_shape']}")
             state = {
@@ -269,6 +307,14 @@ class ControlProcessor(HardwareModule):
                     wait["types"].discard("dma_in")
                     if not wait["types"]:
                         wait["release_cycle"] = self.engine.current_cycle
+                        state = self.program_state.get(event.program)
+                        if state:
+                            state["waiting"] = False
+                            resume = Event(src=self, dst=self,
+                                           cycle=self.engine.current_cycle + 1,
+                                           program=event.program,
+                                           event_type="RUN_PROGRAM")
+                            self.engine.push_event(resume)
 
         elif event.event_type == "NPU_CMD_DONE":
             prog_state = self.active_npu_programs.get(event.program)
@@ -284,6 +330,14 @@ class ControlProcessor(HardwareModule):
                     wait["types"].discard("cmd")
                     if not wait["types"]:
                         wait["release_cycle"] = self.engine.current_cycle
+                        state = self.program_state.get(event.program)
+                        if state:
+                            state["waiting"] = False
+                            resume = Event(src=self, dst=self,
+                                           cycle=self.engine.current_cycle + 1,
+                                           program=event.program,
+                                           event_type="RUN_PROGRAM")
+                            self.engine.push_event(resume)
 
         elif event.event_type == "NPU_DMA_OUT_DONE":
             prog_state = self.active_npu_programs.get(event.program)
@@ -300,6 +354,14 @@ class ControlProcessor(HardwareModule):
                     wait["types"].discard("dma_out")
                     if not wait["types"]:
                         wait["release_cycle"] = self.engine.current_cycle
+                        state = self.program_state.get(event.program)
+                        if state:
+                            state["waiting"] = False
+                            resume = Event(src=self, dst=self,
+                                           cycle=self.engine.current_cycle + 1,
+                                           program=event.program,
+                                           event_type="RUN_PROGRAM")
+                            self.engine.push_event(resume)
 
         else:
             super().handle_event(event)

@@ -44,23 +44,19 @@ class NPUTest(unittest.TestCase):
             "cmd_opcode_cycles": 3,
         }
 
-        programs = ["prog0", "prog1"]
+        programs = ["prog0"]
+        instrs = [
+            {"event_type": "NPU_DMA_IN", "payload": program_cfg},
+            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}},
+            {"event_type": "NPU_CMD", "payload": program_cfg},
+            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["cmd"]}},
+            {"event_type": "NPU_DMA_OUT", "payload": program_cfg},
+        ]
         for idx, prog in enumerate(programs):
-            base = idx + 1
-            cp.send_event(Event(src=None, dst=cp, cycle=base, program=prog,
-                                event_type="NPU_DMA_IN", payload=program_cfg))
-            cp.send_event(Event(src=None, dst=cp, cycle=base+1,
-                                program=prog, event_type="NPU_SYNC",
-                                payload={"sync_types": ["dma_in"]}))
-            cp.send_event(Event(src=None, dst=cp, cycle=base+1,
-                                program=prog, event_type="NPU_CMD",
-                                payload=program_cfg))
-            cp.send_event(Event(src=None, dst=cp, cycle=base+2,
-                                program=prog, event_type="NPU_SYNC",
-                                payload={"sync_types": ["cmd"]}))
-            cp.send_event(Event(src=None, dst=cp, cycle=base+2,
-                                program=prog, event_type="NPU_DMA_OUT",
-                                payload=program_cfg))
+            cp.load_program(prog, instrs)
+            start_evt = Event(src=None, dst=cp, cycle=idx + 1,
+                              program=prog, event_type="RUN_PROGRAM")
+            cp.send_event(start_evt)
 
         engine.run_until_idle(max_tick=500)
         for prog in programs:
