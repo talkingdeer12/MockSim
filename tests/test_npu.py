@@ -44,50 +44,31 @@ class NPUTest(unittest.TestCase):
             "cmd_opcode_cycles": 3,
         }
 
-        dma_in_evt = Event(
-            src=None,
-            dst=cp,
-            cycle=1,
-            program="npu_prog",
-            event_type="NPU_DMA_IN",
-            payload=program_cfg,
-        )
-        cp.send_event(dma_in_evt)
-
-        cmd_evt = Event(
-            src=None,
-            dst=cp,
-            cycle=engine.current_cycle,
-            program="npu_prog",
-            event_type="NPU_CMD",
-            payload={
-                **program_cfg,
-                "sync_type": 0,
-                "sync_targets": ["NPU_0"],
-            },
-        )
-        cp.send_event(cmd_evt)
-
-        out_evt = Event(
-            src=None,
-            dst=cp,
-            cycle=engine.current_cycle,
-            program="npu_prog",
-            event_type="NPU_DMA_OUT",
-            payload={
-                **program_cfg,
-                "sync_type": 1,
-                "sync_targets": ["NPU_0"],
-            },
-        )
-        cp.send_event(out_evt)
+        programs = ["prog0", "prog1"]
+        for idx, prog in enumerate(programs):
+            base = idx + 1
+            cp.send_event(Event(src=None, dst=cp, cycle=base, program=prog,
+                                event_type="NPU_DMA_IN", payload=program_cfg))
+            cp.send_event(Event(src=None, dst=cp, cycle=base+1,
+                                program=prog, event_type="NPU_SYNC",
+                                payload={"sync_types": ["dma_in"]}))
+            cp.send_event(Event(src=None, dst=cp, cycle=base+1,
+                                program=prog, event_type="NPU_CMD",
+                                payload=program_cfg))
+            cp.send_event(Event(src=None, dst=cp, cycle=base+2,
+                                program=prog, event_type="NPU_SYNC",
+                                payload={"sync_types": ["cmd"]}))
+            cp.send_event(Event(src=None, dst=cp, cycle=base+2,
+                                program=prog, event_type="NPU_DMA_OUT",
+                                payload=program_cfg))
 
         engine.run_until_idle(max_tick=500)
-        self.assertTrue(cp.npu_dma_in_opcode_done.get("npu_prog"))
-        self.assertTrue(cp.npu_cmd_opcode_done.get("npu_prog"))
+        for prog in programs:
+            self.assertTrue(cp.npu_dma_in_opcode_done.get(prog))
+            self.assertTrue(cp.npu_cmd_opcode_done.get(prog))
+            self.assertTrue(cp.npu_dma_out_opcode_done.get(prog))
         self.assertEqual(len(engine.event_queue), 0)
         self.assertFalse(cp.active_npu_programs)
-        self.assertTrue(cp.npu_dma_out_opcode_done.get("npu_prog"))
 
 if __name__ == "__main__":
     unittest.main()
