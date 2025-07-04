@@ -52,10 +52,11 @@ Two scenarios are covered:
 
 ## NPU Task Example
 
-The control processor exposes synchronization flags so higher level code can sequence NPU commands.  Each event to the CP may specify:
-
-* `sync_type` – Which previous phase to wait for (`0` = DMA_IN, `1` = CMD, `2` = DMA_OUT).
-* `sync_targets` – Iterable of NPU names that must have reported `_DONE` for the given phase before this event will issue.
+The control processor exposes dedicated synchronization events so higher level
+code can sequence NPU commands. A `*_SYNC` event stalls subsequent CP commands
+until the requested phase has completed.  The event payload may include
+`sync_targets` listing the NPUs that must report completion before execution
+continues.
 
 Below is a minimal example replicating `tests/test_npu.py`:
 
@@ -70,20 +71,38 @@ cp.send_event(Event(
             "cmd_opcode_cycles":3}
 ))
 
-# Compute waits for DMA_IN completion of NPU_0
+# Wait for DMA_IN completion of NPU_0
+cp.send_event(Event(
+    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_DMA_IN_SYNC",
+    payload={"sync_targets": ["NPU_0"]}, priority=-1
+))
+
+# Issue the compute phase
 cp.send_event(Event(
     src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_CMD",
     payload={"program_cycles":3, "in_size":16, "out_size":16,
             "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
-            "cmd_opcode_cycles":3, "sync_type":0, "sync_targets":["NPU_0"]}
+            "cmd_opcode_cycles":3}
 ))
 
-# DMA_OUT waits for the CMD phase to finish
+# Wait for command completion
+cp.send_event(Event(
+    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_CMD_SYNC",
+    payload={"sync_targets": ["NPU_0"]}, priority=-1
+))
+
+# DMA_OUT after compute finishes
 cp.send_event(Event(
     src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_DMA_OUT",
     payload={"program_cycles":3, "in_size":16, "out_size":16,
             "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
-            "cmd_opcode_cycles":3, "sync_type":1, "sync_targets":["NPU_0"]}
+            "cmd_opcode_cycles":3}
+))
+
+# Wait for DMA_OUT completion
+cp.send_event(Event(
+    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_DMA_OUT_SYNC",
+    payload={"sync_targets": ["NPU_0"]}, priority=-1
 ))
 
 engine.run_until_idle()

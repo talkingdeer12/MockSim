@@ -49,26 +49,6 @@ class ControlProcessor(HardwareModule):
             return not pending
         return not pending.intersection(targets)
 
-    def _gate_by_sync(self, event):
-        """Reschedule ``event`` if its ``sync_type`` dependency isn't ready."""
-        sync_type = event.payload.get("sync_type")
-        if sync_type is None:
-            return False
-
-        targets = event.payload.get("sync_targets")
-        if not self._is_sync_ready(event.program, sync_type, targets):
-            retry_evt = Event(
-                src=self,
-                dst=self,
-                cycle=self.engine.current_cycle + 1,
-                data_size=0,
-                program=event.program,
-                event_type=event.event_type,
-                payload=event.payload,
-            )
-            self.send_event(retry_evt)
-            return True
-        return False
 
     def handle_event(self, event):
         if event.event_type == "GEMM":
@@ -164,9 +144,6 @@ class ControlProcessor(HardwareModule):
                 self.active_gemms.pop(event.program, None)
 
         elif event.event_type == "NPU_DMA_IN":
-            if self._gate_by_sync(event):
-                return
-
             prog_state = self._create_program_state(event.payload)
             self.active_npu_programs[event.program] = prog_state
             self.npu_dma_in_opcode_done[event.program] = False
@@ -193,9 +170,6 @@ class ControlProcessor(HardwareModule):
                 self.send_event(dma_evt)
 
         elif event.event_type == "NPU_CMD":
-            if self._gate_by_sync(event):
-                return
-
             program = self.active_npu_programs.get(event.program)
             if not program:
                 return
@@ -221,9 +195,6 @@ class ControlProcessor(HardwareModule):
                 self.send_event(cmd_evt)
 
         elif event.event_type == "NPU_DMA_OUT":
-            if self._gate_by_sync(event):
-                return
-
             program = self.active_npu_programs.get(event.program)
             if not program:
                 return
@@ -249,6 +220,11 @@ class ControlProcessor(HardwareModule):
                 )
                 self.send_event(out_evt)
 
+
+        elif event.event_type in ("NPU_DMA_IN_SYNC", "NPU_CMD_SYNC", "NPU_DMA_OUT_SYNC"):
+            # Synchronization events are no-ops once they reach the CP since
+            # the engine ensured all prerequisites were satisfied.
+            pass
 
         elif event.event_type == "NPU_DMA_IN_DONE":
             prog_state = self.active_npu_programs.get(event.program)
