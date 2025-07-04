@@ -295,73 +295,73 @@ class ControlProcessor(HardwareModule):
 
         elif event.event_type == "NPU_DMA_IN_DONE":
             prog_state = self.active_npu_programs.get(event.program)
-            if not prog_state:
-                return
             npu_name = event.payload["npu_name"]
-            prog_state["waiting_dma_in"].discard(npu_name)
-            if not prog_state["waiting_dma_in"]:
-                # Mark completion so external modules can trigger the next phase
-                self.npu_dma_in_opcode_done[event.program] = True
-                wait = self.npu_sync_wait.get(event.program)
-                if wait and "dma_in" in wait["types"]:
-                    wait["types"].discard("dma_in")
-                    if not wait["types"]:
-                        wait["release_cycle"] = self.engine.current_cycle
-                        state = self.program_state.get(event.program)
-                        if state:
-                            state["waiting"] = False
-                            resume = Event(src=self, dst=self,
-                                           cycle=self.engine.current_cycle + 1,
-                                           program=event.program,
-                                           event_type="RUN_PROGRAM")
-                            self.engine.push_event(resume)
+            if prog_state:
+                prog_state["waiting_dma_in"].discard(npu_name)
+                if prog_state["waiting_dma_in"]:
+                    return
+            # Mark completion so external modules can trigger the next phase
+            self.npu_dma_in_opcode_done[event.program] = True
+            wait = self.npu_sync_wait.get(event.program)
+            if wait and "dma_in" in wait["types"]:
+                wait["types"].discard("dma_in")
+                if not wait["types"]:
+                    wait["release_cycle"] = self.engine.current_cycle
+                    state = self.program_state.get(event.program)
+                    if state:
+                        state["waiting"] = False
+                        resume = Event(src=self, dst=self,
+                                       cycle=self.engine.current_cycle + 1,
+                                       program=event.program,
+                                       event_type="RUN_PROGRAM")
+                        self.engine.push_event(resume)
 
         elif event.event_type == "NPU_CMD_DONE":
             prog_state = self.active_npu_programs.get(event.program)
-            if not prog_state:
-                return
             npu_name = event.payload["npu_name"]
-            prog_state["waiting_op"].discard(npu_name)
-            if not prog_state["waiting_op"]:
-                # Command phase finished
-                self.npu_cmd_opcode_done[event.program] = True
-                wait = self.npu_sync_wait.get(event.program)
-                if wait and "cmd" in wait["types"]:
-                    wait["types"].discard("cmd")
-                    if not wait["types"]:
-                        wait["release_cycle"] = self.engine.current_cycle
-                        state = self.program_state.get(event.program)
-                        if state:
-                            state["waiting"] = False
-                            resume = Event(src=self, dst=self,
-                                           cycle=self.engine.current_cycle + 1,
-                                           program=event.program,
-                                           event_type="RUN_PROGRAM")
-                            self.engine.push_event(resume)
+            if prog_state:
+                prog_state["waiting_op"].discard(npu_name)
+                if prog_state["waiting_op"]:
+                    return
+            # Command phase finished
+            self.npu_cmd_opcode_done[event.program] = True
+            wait = self.npu_sync_wait.get(event.program)
+            if wait and "cmd" in wait["types"]:
+                wait["types"].discard("cmd")
+                if not wait["types"]:
+                    wait["release_cycle"] = self.engine.current_cycle
+                    state = self.program_state.get(event.program)
+                    if state:
+                        state["waiting"] = False
+                        resume = Event(src=self, dst=self,
+                                       cycle=self.engine.current_cycle + 1,
+                                       program=event.program,
+                                       event_type="RUN_PROGRAM")
+                        self.engine.push_event(resume)
 
         elif event.event_type == "NPU_DMA_OUT_DONE":
             prog_state = self.active_npu_programs.get(event.program)
-            if not prog_state:
-                return
             npu_name = event.payload["npu_name"]
-            prog_state["waiting_dma_out"].discard(npu_name)
-            if not prog_state["waiting_dma_out"]:
-                print(f"[CP] NPU task {event.program} 완료")
-                self.npu_dma_out_opcode_done[event.program] = True
-                self.active_npu_programs.pop(event.program, None)
-                wait = self.npu_sync_wait.get(event.program)
-                if wait and "dma_out" in wait["types"]:
-                    wait["types"].discard("dma_out")
-                    if not wait["types"]:
-                        wait["release_cycle"] = self.engine.current_cycle
-                        state = self.program_state.get(event.program)
-                        if state:
-                            state["waiting"] = False
-                            resume = Event(src=self, dst=self,
-                                           cycle=self.engine.current_cycle + 1,
-                                           program=event.program,
-                                           event_type="RUN_PROGRAM")
-                            self.engine.push_event(resume)
+            if prog_state:
+                prog_state["waiting_dma_out"].discard(npu_name)
+                if prog_state["waiting_dma_out"]:
+                    return
+            print(f"[CP] NPU task {event.program} 완료")
+            self.npu_dma_out_opcode_done[event.program] = True
+            self.active_npu_programs.pop(event.program, None)
+            wait = self.npu_sync_wait.get(event.program)
+            if wait and "dma_out" in wait["types"]:
+                wait["types"].discard("dma_out")
+                if not wait["types"]:
+                    wait["release_cycle"] = self.engine.current_cycle
+                    state = self.program_state.get(event.program)
+                    if state:
+                        state["waiting"] = False
+                        resume = Event(src=self, dst=self,
+                                       cycle=self.engine.current_cycle + 1,
+                                       program=event.program,
+                                       event_type="RUN_PROGRAM")
+                        self.engine.push_event(resume)
 
         else:
             super().handle_event(event)
