@@ -12,6 +12,7 @@ class NPU(PipelineModule):
         self.opcode_total_cycles = 0
         self.program_identifier = None
         self.cp_name = None
+        self.cp_name_by_prog = {}
         self.cmd_need_reply = False
         funcs = [self._make_stage_func(i) for i in range(pipeline_stages)]
         self.set_stage_funcs(funcs)
@@ -58,6 +59,7 @@ class NPU(PipelineModule):
             self.expected_dma_reads[event.program] = total
             self.received_dma_reads[event.program] = 0
             self.cp_name = event.payload["src_name"]
+            self.cp_name_by_prog[event.program] = self.cp_name
             dram_coords = list(self.mesh_info["dram_coords"].values())[0]
             for i in range(total):
                 read_evt = Event(
@@ -88,7 +90,7 @@ class NPU(PipelineModule):
                     program=event.program,
                     event_type="NPU_DMA_IN_DONE",
                     payload={
-                        "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
+                        "dst_coords": self.mesh_info["cp_coords"][self.cp_name_by_prog[event.program]],
                         "npu_name": self.name,
                         "input_port": 0,
                         "vc": 0,
@@ -103,6 +105,7 @@ class NPU(PipelineModule):
             self.opcode_total_cycles = cycles
             self.program_identifier = event.program
             self.cp_name = event.payload["src_name"]
+            self.cp_name_by_prog[event.program] = self.cp_name
             need_reply = event.payload.get("need_reply", False)
             for _ in range(cycles):
                 token = {}
@@ -115,6 +118,7 @@ class NPU(PipelineModule):
             self.expected_dma_writes[event.program] = total
             self.received_dma_writes[event.program] = 0
             self.cp_name = event.payload["src_name"]
+            self.cp_name_by_prog[event.program] = self.cp_name
             dram_coords = list(self.mesh_info["dram_coords"].values())[0]
             for i in range(total):
                 wr_evt = Event(
@@ -145,7 +149,7 @@ class NPU(PipelineModule):
                     program=event.program,
                     event_type="NPU_DMA_OUT_DONE",
                     payload={
-                        "dst_coords": self.mesh_info["cp_coords"][self.cp_name],
+                        "dst_coords": self.mesh_info["cp_coords"][self.cp_name_by_prog[event.program]],
                         "npu_name": self.name,
                         "input_port": 0,
                         "vc": 0,
@@ -154,6 +158,7 @@ class NPU(PipelineModule):
                 self.send_event(done_evt)
                 del self.expected_dma_writes[event.program]
                 del self.received_dma_writes[event.program]
+                self.cp_name_by_prog.pop(event.program, None)
         else:
             super().handle_event(event)
 
