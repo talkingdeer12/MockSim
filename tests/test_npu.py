@@ -51,36 +51,64 @@ class NPUTest(unittest.TestCase):
             program="npu_prog",
             event_type="NPU_DMA_IN",
             payload=program_cfg,
+            priority=-1,
         )
         cp.send_event(dma_in_evt)
+
+        dma_in_sync = Event(
+            src=None,
+            dst=cp,
+            cycle=1,
+            program="npu_prog",
+            event_type="NPU_DMA_IN_SYNC",
+            payload={"sync_targets": ["NPU_0"]},
+            priority=0,
+        )
+        cp.send_event(dma_in_sync)
 
         cmd_evt = Event(
             src=None,
             dst=cp,
-            cycle=engine.current_cycle,
+            cycle=1,
             program="npu_prog",
             event_type="NPU_CMD",
-            payload={
-                **program_cfg,
-                "sync_type": 0,
-                "sync_targets": ["NPU_0"],
-            },
+            payload=program_cfg,
+            priority=1,
         )
         cp.send_event(cmd_evt)
+
+        cmd_sync = Event(
+            src=None,
+            dst=cp,
+            cycle=1,
+            program="npu_prog",
+            event_type="NPU_CMD_SYNC",
+            payload={"sync_targets": ["NPU_0"]},
+            priority=2,
+        )
+        cp.send_event(cmd_sync)
 
         out_evt = Event(
             src=None,
             dst=cp,
-            cycle=engine.current_cycle,
+            cycle=1,
             program="npu_prog",
             event_type="NPU_DMA_OUT",
-            payload={
-                **program_cfg,
-                "sync_type": 1,
-                "sync_targets": ["NPU_0"],
-            },
+            payload=program_cfg,
+            priority=3,
         )
         cp.send_event(out_evt)
+
+        out_sync = Event(
+            src=None,
+            dst=cp,
+            cycle=1,
+            program="npu_prog",
+            event_type="NPU_DMA_OUT_SYNC",
+            payload={"sync_targets": ["NPU_0"]},
+            priority=4,
+        )
+        cp.send_event(out_sync)
 
         engine.run_until_idle(max_tick=500)
         self.assertTrue(cp.npu_dma_in_opcode_done.get("npu_prog"))
