@@ -26,8 +26,14 @@ class HardwareModule:
     def _process_event(self, event):
         try:
             if self.engine.logger:
-                stage = event.payload.get('stage_idx', 0) if isinstance(event.payload, dict) else 0
-                self.engine.logger.log_event(self.engine.current_cycle, self.name, stage, event.event_type)
+                stage = (
+                    event.payload.get("stage_idx", 0)
+                    if isinstance(event.payload, dict)
+                    else 0
+                )
+                self.engine.logger.log_event(
+                    self.engine.current_cycle, self.name, stage, event.event_type
+                )
             self.handle_event(event)
         finally:
             self._release_slot(event)
@@ -42,8 +48,13 @@ class HardwareModule:
             # Destination buffer full; stall and retry next cycle
             if hasattr(self, "set_stall"):
                 self.set_stall(1)
-            retry = Event(src=self, dst=self, cycle=self.engine.current_cycle + 1,
-                           event_type="RETRY_SEND", payload={"event": event})
+            retry = Event(
+                src=self,
+                dst=self,
+                cycle=self.engine.current_cycle + 1,
+                event_type="RETRY_SEND",
+                payload={"event": event},
+            )
             self.engine.push_event(retry)
         else:
             self.engine.push_event(event)
@@ -55,8 +66,7 @@ class PipelineModule(HardwareModule):
     def __init__(self, engine, name, mesh_info, num_stages, buffer_capacity=4):
         super().__init__(engine, name, mesh_info, buffer_capacity)
         self.num_stages = num_stages
-        self.stage_funcs = [lambda m, d: (d, i + 1, False)
-                           for i in range(num_stages)]
+        self.stage_funcs = [lambda m, d: (d, i + 1, False) for i in range(num_stages)]
         self.stage_queues = [list() for _ in range(num_stages)]
         self.stage_scheduled = [False for _ in range(num_stages)]
         self.stage_capacity = buffer_capacity
@@ -74,12 +84,14 @@ class PipelineModule(HardwareModule):
 
     def _schedule_stage(self, idx):
         if not self.stage_scheduled[idx]:
-            evt = Event(src=self,
-                        dst=self,
-                        cycle=self.engine.current_cycle + 1,
-                        event_type="PIPE_STAGE",
-                        payload={"stage_idx": idx},
-                        priority=-idx)
+            evt = Event(
+                src=self,
+                dst=self,
+                cycle=self.engine.current_cycle + 1,
+                event_type="PIPE_STAGE",
+                payload={"stage_idx": idx},
+                priority=-idx,
+            )
             self.send_event(evt)
             self.stage_scheduled[idx] = True
 
@@ -110,7 +122,10 @@ class PipelineModule(HardwareModule):
             self._schedule_stage(idx)
             return
 
-        if next_stage < self.num_stages and len(self.stage_queues[next_stage]) >= self.stage_capacity:
+        if (
+            next_stage < self.num_stages
+            and len(self.stage_queues[next_stage]) >= self.stage_capacity
+        ):
             # downstream stage full - retry later
             self._schedule_stage(idx)
             return
@@ -128,3 +143,65 @@ class PipelineModule(HardwareModule):
 
     def handle_pipeline_output(self, data):
         pass
+
+
+class SyncModule(HardwareModule):
+    """Mixin providing synchronization utilities for *_SYNC instructions."""
+
+    def __init__(self, engine, name, mesh_info, buffer_capacity=4):
+        super().__init__(engine, name, mesh_info, buffer_capacity)
+        # Map program -> {"types": set(str), "release_cycle": int}
+        self.sync_wait = {}
+
+    def gate_by_sync(self, event, allowed=()):
+        """Return True if the event should be retried due to an active sync."""
+        wait = self.sync_wait.get(event.program)
+        if not wait:
+            return False
+
+        if event.event_type not in allowed and (
+            wait["types"] or wait.get("release_cycle") == self.engine.current_cycle
+        ):
+            retry_evt = Event(
+                src=self,
+                dst=self,
+                cycle=self.engine.current_cycle + 1,
+                program=event.program,
+                event_type=event.event_type,
+                payload=event.payload,
+                data_size=getattr(event, "data_size", 0),
+            )
+            self.send_event(retry_evt)
+            return True
+
+        if (
+            not wait["types"]
+            and wait.get("release_cycle", -1) < self.engine.current_cycle
+        ):
+            del self.sync_wait[event.program]
+        return False
+
+    def process_phase_done(
+        self,
+        program,
+        actor,
+        active_states,
+        waiting_field,
+        done_dict,
+        wait_type,
+        resume_fn,
+    ):
+        """Common logic for handling *_DONE events under synchronization."""
+        state = active_states.get(program)
+        if state:
+            state[waiting_field].discard(actor)
+            if state[waiting_field]:
+                return False
+        done_dict[program] = True
+        wait = self.sync_wait.get(program)
+        if wait and wait_type in wait["types"]:
+            wait["types"].discard(wait_type)
+            if not wait["types"]:
+                wait["release_cycle"] = self.engine.current_cycle
+                resume_fn()
+        return True
