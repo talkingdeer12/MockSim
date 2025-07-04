@@ -15,6 +15,10 @@ class ControlProcessor(HardwareModule):
         self.npu_cmd_opcode_done = {}
         self.npu_dma_out_opcode_done = {}
         # Per-program NPU synchronization state
+        # Each entry keeps a set of remaining phase names and the cycle the sync
+        # was released.  We keep the entry around for one extra cycle so that
+        # events scheduled in the same cycle as the *_DONE that released the
+        # sync are still blocked.
         self.npu_sync_wait = {}
 
     def _create_program_state(self, payload):
@@ -33,15 +37,16 @@ class ControlProcessor(HardwareModule):
     def _gate_by_npu_sync(self, event):
         """Delay NPU events while a sync is active for its program."""
         wait = self.npu_sync_wait.get(event.program)
+        if not wait:
+            return False
+
+        # If the sync has been released this cycle we still block events until
+        # the next cycle to guarantee deterministic ordering with *_DONE events.
         if (
-            wait
-            and event.event_type.startswith("NPU_")
-            and event.event_type not in (
-                "NPU_SYNC",
-                "NPU_DMA_IN_DONE",
-                "NPU_CMD_DONE",
-                "NPU_DMA_OUT_DONE",
-            )
+            event.event_type.startswith("NPU_")
+            and event.event_type
+            not in ("NPU_SYNC", "NPU_DMA_IN_DONE", "NPU_CMD_DONE", "NPU_DMA_OUT_DONE")
+            and (wait["types"] or wait.get("release_cycle") == self.engine.current_cycle)
         ):
             retry_evt = Event(
                 src=self,
@@ -54,6 +59,11 @@ class ControlProcessor(HardwareModule):
             )
             self.send_event(retry_evt)
             return True
+
+        # Remove the entry once the release cycle has fully passed
+        if not wait["types"] and wait.get("release_cycle", -1) < self.engine.current_cycle:
+            del self.npu_sync_wait[event.program]
+
         return False
 
 
@@ -151,8 +161,12 @@ class ControlProcessor(HardwareModule):
                 self.active_gemms.pop(event.program, None)
 
         elif event.event_type == "NPU_SYNC":
-            # Block subsequent NPU events for this program until requested phases finish
-            self.npu_sync_wait[event.program] = set(event.payload.get("sync_types", []))
+            # Block subsequent NPU events for this program until the requested
+            # phases report completion.
+            self.npu_sync_wait[event.program] = {
+                "types": set(event.payload.get("sync_types", [])),
+                "release_cycle": None,
+            }
 
         elif event.event_type == "NPU_DMA_IN":
             if self._gate_by_npu_sync(event):
@@ -251,10 +265,10 @@ class ControlProcessor(HardwareModule):
                 # Mark completion so external modules can trigger the next phase
                 self.npu_dma_in_opcode_done[event.program] = True
                 wait = self.npu_sync_wait.get(event.program)
-                if wait and "dma_in" in wait:
-                    wait.discard("dma_in")
-                    if not wait:
-                        del self.npu_sync_wait[event.program]
+                if wait and "dma_in" in wait["types"]:
+                    wait["types"].discard("dma_in")
+                    if not wait["types"]:
+                        wait["release_cycle"] = self.engine.current_cycle
 
         elif event.event_type == "NPU_CMD_DONE":
             prog_state = self.active_npu_programs.get(event.program)
@@ -266,10 +280,10 @@ class ControlProcessor(HardwareModule):
                 # Command phase finished
                 self.npu_cmd_opcode_done[event.program] = True
                 wait = self.npu_sync_wait.get(event.program)
-                if wait and "cmd" in wait:
-                    wait.discard("cmd")
-                    if not wait:
-                        del self.npu_sync_wait[event.program]
+                if wait and "cmd" in wait["types"]:
+                    wait["types"].discard("cmd")
+                    if not wait["types"]:
+                        wait["release_cycle"] = self.engine.current_cycle
 
         elif event.event_type == "NPU_DMA_OUT_DONE":
             prog_state = self.active_npu_programs.get(event.program)
@@ -282,10 +296,10 @@ class ControlProcessor(HardwareModule):
                 self.npu_dma_out_opcode_done[event.program] = True
                 self.active_npu_programs.pop(event.program, None)
                 wait = self.npu_sync_wait.get(event.program)
-                if wait and "dma_out" in wait:
-                    wait.discard("dma_out")
-                    if not wait:
-                        del self.npu_sync_wait[event.program]
+                if wait and "dma_out" in wait["types"]:
+                    wait["types"].discard("dma_out")
+                    if not wait["types"]:
+                        wait["release_cycle"] = self.engine.current_cycle
 
         else:
             super().handle_event(event)
