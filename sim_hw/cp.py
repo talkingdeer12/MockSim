@@ -14,6 +14,8 @@ class ControlProcessor(HardwareModule):
         self.npu_dma_in_opcode_done = {}
         self.npu_cmd_opcode_done = {}
         self.npu_dma_out_opcode_done = {}
+        # Per-program NPU synchronization state
+        self.npu_sync_wait = {}
 
     def _create_program_state(self, payload):
         return {
@@ -28,35 +30,19 @@ class ControlProcessor(HardwareModule):
             "cmd_opcode_cycles": payload.get("cmd_opcode_cycles", payload["program_cycles"]),
         }
 
-    def _is_sync_ready(self, program, sync_type, targets=None):
-        """Return True if the given sync type has completed for ``program``.
-
-        ``targets`` may be an iterable of NPU names to check. If ``None`` it
-        checks all NPUs involved in the task.
-        """
-        state = self.active_npu_programs.get(program)
-        if not state:
-            return True
-
-        if sync_type == 0:
-            pending = state["waiting_dma_in"]
-        elif sync_type == 1:
-            pending = state["waiting_op"]
-        else:
-            pending = state["waiting_dma_out"]
-
-        if targets is None:
-            return not pending
-        return not pending.intersection(targets)
-
-    def _gate_by_sync(self, event):
-        """Reschedule ``event`` if its ``sync_type`` dependency isn't ready."""
-        sync_type = event.payload.get("sync_type")
-        if sync_type is None:
-            return False
-
-        targets = event.payload.get("sync_targets")
-        if not self._is_sync_ready(event.program, sync_type, targets):
+    def _gate_by_npu_sync(self, event):
+        """Delay NPU events while a sync is active for its program."""
+        wait = self.npu_sync_wait.get(event.program)
+        if (
+            wait
+            and event.event_type.startswith("NPU_")
+            and event.event_type not in (
+                "NPU_SYNC",
+                "NPU_DMA_IN_DONE",
+                "NPU_CMD_DONE",
+                "NPU_DMA_OUT_DONE",
+            )
+        ):
             retry_evt = Event(
                 src=self,
                 dst=self,
@@ -69,6 +55,7 @@ class ControlProcessor(HardwareModule):
             self.send_event(retry_evt)
             return True
         return False
+
 
     def handle_event(self, event):
         if event.event_type == "GEMM":
@@ -163,8 +150,12 @@ class ControlProcessor(HardwareModule):
                 print(f"[CP] GEMM {event.program} 작업 완료")
                 self.active_gemms.pop(event.program, None)
 
+        elif event.event_type == "NPU_SYNC":
+            # Block subsequent NPU events for this program until requested phases finish
+            self.npu_sync_wait[event.program] = set(event.payload.get("sync_types", []))
+
         elif event.event_type == "NPU_DMA_IN":
-            if self._gate_by_sync(event):
+            if self._gate_by_npu_sync(event):
                 return
 
             prog_state = self._create_program_state(event.payload)
@@ -193,7 +184,7 @@ class ControlProcessor(HardwareModule):
                 self.send_event(dma_evt)
 
         elif event.event_type == "NPU_CMD":
-            if self._gate_by_sync(event):
+            if self._gate_by_npu_sync(event):
                 return
 
             program = self.active_npu_programs.get(event.program)
@@ -221,7 +212,7 @@ class ControlProcessor(HardwareModule):
                 self.send_event(cmd_evt)
 
         elif event.event_type == "NPU_DMA_OUT":
-            if self._gate_by_sync(event):
+            if self._gate_by_npu_sync(event):
                 return
 
             program = self.active_npu_programs.get(event.program)
@@ -259,6 +250,11 @@ class ControlProcessor(HardwareModule):
             if not prog_state["waiting_dma_in"]:
                 # Mark completion so external modules can trigger the next phase
                 self.npu_dma_in_opcode_done[event.program] = True
+                wait = self.npu_sync_wait.get(event.program)
+                if wait and "dma_in" in wait:
+                    wait.discard("dma_in")
+                    if not wait:
+                        del self.npu_sync_wait[event.program]
 
         elif event.event_type == "NPU_CMD_DONE":
             prog_state = self.active_npu_programs.get(event.program)
@@ -269,6 +265,11 @@ class ControlProcessor(HardwareModule):
             if not prog_state["waiting_op"]:
                 # Command phase finished
                 self.npu_cmd_opcode_done[event.program] = True
+                wait = self.npu_sync_wait.get(event.program)
+                if wait and "cmd" in wait:
+                    wait.discard("cmd")
+                    if not wait:
+                        del self.npu_sync_wait[event.program]
 
         elif event.event_type == "NPU_DMA_OUT_DONE":
             prog_state = self.active_npu_programs.get(event.program)
@@ -280,6 +281,11 @@ class ControlProcessor(HardwareModule):
                 print(f"[CP] NPU task {event.program} 완료")
                 self.npu_dma_out_opcode_done[event.program] = True
                 self.active_npu_programs.pop(event.program, None)
+                wait = self.npu_sync_wait.get(event.program)
+                if wait and "dma_out" in wait:
+                    wait.discard("dma_out")
+                    if not wait:
+                        del self.npu_sync_wait[event.program]
 
         else:
             super().handle_event(event)
