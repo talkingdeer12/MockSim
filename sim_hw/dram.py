@@ -21,6 +21,10 @@ class DRAM(PipelineModule):
         self.last_channel = -1
         self.set_stage_funcs([self._stage_func])
 
+        # Event dispatch table to make adding new opcodes easy.
+        self.event_handlers = {}
+        self._register_default_handlers()
+
     def _stage_func(self, mod, data):
         data["remaining"] -= 1
         if data["remaining"] > 0:
@@ -44,38 +48,57 @@ class DRAM(PipelineModule):
             self.send_event(evt)
             self.channel_scheduled[ch] = True
 
+    def register_handler(self, evt_type, fn):
+        """Register handler ``fn`` for ``evt_type``."""
+        self.event_handlers[evt_type] = fn
+
+    def _register_default_handlers(self):
+        self.register_handler("DMA_WRITE", self._handle_dma_access)
+        self.register_handler("DMA_READ", self._handle_dma_access)
+        self.register_handler("DRAM_CHANNEL", self._handle_dram_channel)
+
     def handle_event(self, event):
-        if event.event_type in ("DMA_WRITE", "DMA_READ"):
-            op = {
-                "type": event.event_type,
-                "program": event.program,
-                "src_name": event.payload["src_name"],
-                "remaining": event.payload.get("opcode_cycles", self.pipeline_latency),
-                "task_id": event.payload.get("task_id"),
-            }
-            if event.payload.get("need_reply"):
-                op["dst_name"] = event.payload["src_name"]
-            ch = self._select_channel(op)
-            print(f"[DRAM] enqueue {op['type']} task={op.get('task_id')} ch={ch} cycle={self.engine.current_cycle}")
-            op["channel_id"] = ch
-            self.channel_queues[ch].append(op)
-            self._schedule_channel(ch)
-        elif event.event_type == "DRAM_CHANNEL":
-            ch = event.payload["channel_id"]
-            self.channel_scheduled[ch] = False
-            if not self.channel_queues[ch]:
-                return
-            op = self.channel_queues[ch][0]
-            op["remaining"] -= 1
-            if op["remaining"] > 0:
-                self._schedule_channel(ch)
-                return
-            self.channel_queues[ch].pop(0)
-            self.handle_pipeline_output(op)
-            if self.channel_queues[ch]:
-                self._schedule_channel(ch)
+        handler = self.event_handlers.get(event.event_type)
+        if handler:
+            handler(event)
         else:
             super().handle_event(event)
+
+    # ------------------------------------------------------------------
+    # Individual handlers
+
+    def _handle_dma_access(self, event):
+        op = {
+            "type": event.event_type,
+            "program": event.program,
+            "src_name": event.payload["src_name"],
+            "remaining": event.payload.get("opcode_cycles", self.pipeline_latency),
+            "task_id": event.payload.get("task_id"),
+        }
+        if event.payload.get("need_reply"):
+            op["dst_name"] = event.payload["src_name"]
+        ch = self._select_channel(op)
+        print(
+            f"[DRAM] enqueue {op['type']} task={op.get('task_id')} ch={ch} cycle={self.engine.current_cycle}"
+        )
+        op["channel_id"] = ch
+        self.channel_queues[ch].append(op)
+        self._schedule_channel(ch)
+
+    def _handle_dram_channel(self, event):
+        ch = event.payload["channel_id"]
+        self.channel_scheduled[ch] = False
+        if not self.channel_queues[ch]:
+            return
+        op = self.channel_queues[ch][0]
+        op["remaining"] -= 1
+        if op["remaining"] > 0:
+            self._schedule_channel(ch)
+            return
+        self.channel_queues[ch].pop(0)
+        self.handle_pipeline_output(op)
+        if self.channel_queues[ch]:
+            self._schedule_channel(ch)
 
     def handle_pipeline_output(self, op):
         if op["type"] == "DMA_WRITE":

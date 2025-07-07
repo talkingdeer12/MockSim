@@ -22,6 +22,11 @@ class NPU(PipelineModule):
         funcs = [self._make_stage_func(i) for i in range(pipeline_stages)]
         self.set_stage_funcs(funcs)
 
+        # Event handler dispatch table. This mirrors the CP style so new
+        # operations can be added without editing ``handle_event``.
+        self.event_handlers = {}
+        self._register_default_handlers()
+
     def _make_stage_func(self, idx):
         def func(mod, data):
             return data, idx + 1, False
@@ -40,6 +45,17 @@ class NPU(PipelineModule):
         self.current_cmd = {"info": info, "remaining": info["cycles"]}
         for _ in range(info["cycles"]):
             self.add_data({}, stage_idx=0)
+
+    def register_handler(self, evt_type, fn):
+        """Register an event handler function for ``evt_type``."""
+        self.event_handlers[evt_type] = fn
+
+    def _register_default_handlers(self):
+        self.register_handler("NPU_DMA_IN", self._handle_npu_dma_in)
+        self.register_handler("DMA_READ_REPLY", self._handle_dma_read_reply)
+        self.register_handler("NPU_CMD", self._handle_npu_cmd)
+        self.register_handler("NPU_DMA_OUT", self._handle_npu_dma_out)
+        self.register_handler("WRITE_REPLY", self._handle_write_reply)
 
     def handle_pipeline_output(self, data):
         """Called when a pipeline token exits the final stage."""
@@ -76,129 +92,139 @@ class NPU(PipelineModule):
             self._start_next_cmd()
 
     def handle_event(self, event):
-        if event.event_type == "NPU_DMA_IN":
-            key = (event.program, event.payload.get("task_id"))
-            total = event.payload["data_size"] // 4
-            self.expected_dma_reads[key] = total
-            self.received_dma_reads[key] = 0
-            self.requester_name_by_prog[key] = event.payload["src_name"]
-            dram_coords = list(self.mesh_info["dram_coords"].values())[0]
-            for i in range(total):
-                read_evt = Event(
-                    src=self,
-                    dst=self.get_my_router(),
-                    cycle=self.engine.current_cycle + i,
-                    data_size=4,
-                    program=event.program,
-                    event_type="DMA_READ",
-                    payload={
-                        "dst_coords": dram_coords,
-                        "src_name": self.name,
-                        "need_reply": True,
-                        "opcode_cycles": event.payload.get("opcode_cycles", 5),
-                        "task_id": event.payload.get("task_id"),
-                        "input_port": 0,
-                        "vc": 0,
-                    },
-                )
-                self.send_event(read_evt)
-        elif event.event_type == "DMA_READ_REPLY":
-            key = (event.program, event.payload.get("task_id"))
-            self.received_dma_reads[key] += 1
-            if self.received_dma_reads[key] >= self.expected_dma_reads[key]:
-                dst_name = self.requester_name_by_prog.get(key)
-                coords = (
-                    self.mesh_info.get("cp_coords", {}).get(dst_name)
-                    or self.mesh_info.get("pe_coords", {}).get(dst_name)
-                    or self.mesh_info.get("npu_coords", {}).get(dst_name)
-                    or self.mesh_info.get("dram_coords", {}).get(dst_name)
-                )
-                done_evt = Event(
-                    src=self,
-                    dst=self.get_my_router(),
-                    cycle=self.engine.current_cycle,
-                    data_size=4,
-                    program=event.program,
-                    event_type="NPU_DMA_IN_DONE",
-                    payload={
-                        "dst_coords": coords,
-                        "npu_name": self.name,
-                        "task_id": event.payload.get("task_id"),
-                        "input_port": 0,
-                        "vc": 0,
-                    },
-                )
-                self.send_event(done_evt)
-                del self.expected_dma_reads[key]
-                del self.received_dma_reads[key]
-        elif event.event_type == "NPU_CMD":
-            cmd = {
-                "program": event.program,
-                "task_id": event.payload.get("task_id"),
-                "cycles": event.payload["opcode_cycles"],
-                "dst_name": event.payload["src_name"],
-            }
-            self.cmd_queue.append(cmd)
-            self.requester_name_by_prog[(event.program, cmd["task_id"])] = cmd["dst_name"]
-            self._start_next_cmd()
-        elif event.event_type == "NPU_DMA_OUT":
-            key = (event.program, event.payload.get("task_id"))
-            total = event.payload["data_size"] // 4
-            self.expected_dma_writes[key] = total
-            self.received_dma_writes[key] = 0
-            self.requester_name_by_prog[key] = event.payload["src_name"]
-            dram_coords = list(self.mesh_info["dram_coords"].values())[0]
-            for i in range(total):
-                wr_evt = Event(
-                    src=self,
-                    dst=self.get_my_router(),
-                    cycle=self.engine.current_cycle + i,
-                    data_size=4,
-                    program=event.program,
-                    event_type="DMA_WRITE",
-                    payload={
-                        "dst_coords": dram_coords,
-                        "src_name": self.name,
-                        "need_reply": True,
-                        "opcode_cycles": event.payload.get("opcode_cycles", 5),
-                        "task_id": event.payload.get("task_id"),
-                        "input_port": 0,
-                        "vc": 0,
-                    },
-                )
-                self.send_event(wr_evt)
-        elif event.event_type == "WRITE_REPLY":
-            key = (event.program, event.payload.get("task_id"))
-            self.received_dma_writes[key] += 1
-            if self.received_dma_writes[key] >= self.expected_dma_writes[key]:
-                dst_name = self.requester_name_by_prog.get(key)
-                coords = (
-                    self.mesh_info.get("cp_coords", {}).get(dst_name)
-                    or self.mesh_info.get("pe_coords", {}).get(dst_name)
-                    or self.mesh_info.get("npu_coords", {}).get(dst_name)
-                    or self.mesh_info.get("dram_coords", {}).get(dst_name)
-                )
-                done_evt = Event(
-                    src=self,
-                    dst=self.get_my_router(),
-                    cycle=self.engine.current_cycle,
-                    data_size=4,
-                    program=event.program,
-                    event_type="NPU_DMA_OUT_DONE",
-                    payload={
-                        "dst_coords": coords,
-                        "npu_name": self.name,
-                        "task_id": event.payload.get("task_id"),
-                        "input_port": 0,
-                        "vc": 0,
-                    },
-                )
-                self.send_event(done_evt)
-                del self.expected_dma_writes[key]
-                del self.received_dma_writes[key]
-                # Do not remove mapping so that future operations can use it
+        handler = self.event_handlers.get(event.event_type)
+        if handler:
+            handler(event)
         else:
             super().handle_event(event)
+
+    # ------------------------------------------------------------------
+    # Individual event handlers
+
+    def _handle_npu_dma_in(self, event):
+        key = (event.program, event.payload.get("task_id"))
+        total = event.payload["data_size"] // 4
+        self.expected_dma_reads[key] = total
+        self.received_dma_reads[key] = 0
+        self.requester_name_by_prog[key] = event.payload["src_name"]
+        dram_coords = list(self.mesh_info["dram_coords"].values())[0]
+        for i in range(total):
+            read_evt = Event(
+                src=self,
+                dst=self.get_my_router(),
+                cycle=self.engine.current_cycle + i,
+                data_size=4,
+                program=event.program,
+                event_type="DMA_READ",
+                payload={
+                    "dst_coords": dram_coords,
+                    "src_name": self.name,
+                    "need_reply": True,
+                    "opcode_cycles": event.payload.get("opcode_cycles", 5),
+                    "task_id": event.payload.get("task_id"),
+                    "input_port": 0,
+                    "vc": 0,
+                },
+            )
+            self.send_event(read_evt)
+
+    def _handle_dma_read_reply(self, event):
+        key = (event.program, event.payload.get("task_id"))
+        self.received_dma_reads[key] += 1
+        if self.received_dma_reads[key] >= self.expected_dma_reads[key]:
+            dst_name = self.requester_name_by_prog.get(key)
+            coords = (
+                self.mesh_info.get("cp_coords", {}).get(dst_name)
+                or self.mesh_info.get("pe_coords", {}).get(dst_name)
+                or self.mesh_info.get("npu_coords", {}).get(dst_name)
+                or self.mesh_info.get("dram_coords", {}).get(dst_name)
+            )
+            done_evt = Event(
+                src=self,
+                dst=self.get_my_router(),
+                cycle=self.engine.current_cycle,
+                data_size=4,
+                program=event.program,
+                event_type="NPU_DMA_IN_DONE",
+                payload={
+                    "dst_coords": coords,
+                    "npu_name": self.name,
+                    "task_id": event.payload.get("task_id"),
+                    "input_port": 0,
+                    "vc": 0,
+                },
+            )
+            self.send_event(done_evt)
+            del self.expected_dma_reads[key]
+            del self.received_dma_reads[key]
+
+    def _handle_npu_cmd(self, event):
+        cmd = {
+            "program": event.program,
+            "task_id": event.payload.get("task_id"),
+            "cycles": event.payload["opcode_cycles"],
+            "dst_name": event.payload["src_name"],
+        }
+        self.cmd_queue.append(cmd)
+        self.requester_name_by_prog[(event.program, cmd["task_id"])] = cmd["dst_name"]
+        self._start_next_cmd()
+
+    def _handle_npu_dma_out(self, event):
+        key = (event.program, event.payload.get("task_id"))
+        total = event.payload["data_size"] // 4
+        self.expected_dma_writes[key] = total
+        self.received_dma_writes[key] = 0
+        self.requester_name_by_prog[key] = event.payload["src_name"]
+        dram_coords = list(self.mesh_info["dram_coords"].values())[0]
+        for i in range(total):
+            wr_evt = Event(
+                src=self,
+                dst=self.get_my_router(),
+                cycle=self.engine.current_cycle + i,
+                data_size=4,
+                program=event.program,
+                event_type="DMA_WRITE",
+                payload={
+                    "dst_coords": dram_coords,
+                    "src_name": self.name,
+                    "need_reply": True,
+                    "opcode_cycles": event.payload.get("opcode_cycles", 5),
+                    "task_id": event.payload.get("task_id"),
+                    "input_port": 0,
+                    "vc": 0,
+                },
+            )
+            self.send_event(wr_evt)
+
+    def _handle_write_reply(self, event):
+        key = (event.program, event.payload.get("task_id"))
+        self.received_dma_writes[key] += 1
+        if self.received_dma_writes[key] >= self.expected_dma_writes[key]:
+            dst_name = self.requester_name_by_prog.get(key)
+            coords = (
+                self.mesh_info.get("cp_coords", {}).get(dst_name)
+                or self.mesh_info.get("pe_coords", {}).get(dst_name)
+                or self.mesh_info.get("npu_coords", {}).get(dst_name)
+                or self.mesh_info.get("dram_coords", {}).get(dst_name)
+            )
+            done_evt = Event(
+                src=self,
+                dst=self.get_my_router(),
+                cycle=self.engine.current_cycle,
+                data_size=4,
+                program=event.program,
+                event_type="NPU_DMA_OUT_DONE",
+                payload={
+                    "dst_coords": coords,
+                    "npu_name": self.name,
+                    "task_id": event.payload.get("task_id"),
+                    "input_port": 0,
+                    "vc": 0,
+                },
+            )
+            self.send_event(done_evt)
+            del self.expected_dma_writes[key]
+            del self.received_dma_writes[key]
 
     def get_my_router(self):
         coords = self.mesh_info["npu_coords"][self.name]
