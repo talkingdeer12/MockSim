@@ -90,9 +90,6 @@ class ControlProcessor(SyncModule):
             self.npu_cmd_opcode_done[name] = True
             self.npu_dma_out_opcode_done[name] = True
 
-    def _gate_by_npu_sync(self, event):
-        allowed = ("NPU_SYNC", "NPU_DMA_IN_DONE", "NPU_CMD_DONE", "NPU_DMA_OUT_DONE")
-        return self.gate_by_sync(event, allowed)
 
     def register_handler(self, evt_type, fn):
         """Register a handler for ``evt_type``."""
@@ -143,14 +140,25 @@ class ControlProcessor(SyncModule):
             return
 
         instr = prog[state["pc"]]
-        state["pc"] += 1
-        if instr["event_type"] == "NPU_SYNC":
+        etype = instr["event_type"]
+        if etype == "NPU_DMA_IN" and not self.npu_dma_in_opcode_done.get(event.program, True):
             state["waiting"] = True
-        elif instr["event_type"] == "NPU_DMA_IN":
+            return
+        if etype == "NPU_CMD" and not self.npu_cmd_opcode_done.get(event.program, True):
+            state["waiting"] = True
+            return
+        if etype == "NPU_DMA_OUT" and not self.npu_dma_out_opcode_done.get(event.program, True):
+            state["waiting"] = True
+            return
+
+        state["pc"] += 1
+        if etype == "NPU_SYNC":
+            state["waiting"] = True
+        elif etype == "NPU_DMA_IN":
             self.npu_dma_in_opcode_done[event.program] = False
-        elif instr["event_type"] == "NPU_CMD":
+        elif etype == "NPU_CMD":
             self.npu_cmd_opcode_done[event.program] = False
-        elif instr["event_type"] == "NPU_DMA_OUT":
+        elif etype == "NPU_DMA_OUT":
             self.npu_dma_out_opcode_done[event.program] = False
 
         instr_evt = Event(
@@ -158,7 +166,7 @@ class ControlProcessor(SyncModule):
             dst=self,
             cycle=self.engine.current_cycle,
             program=event.program,
-            event_type=instr["event_type"],
+            event_type=etype,
             payload=instr.get("payload", {}),
         )
         tsk = instr_evt.payload.get("task_id")
@@ -283,8 +291,6 @@ class ControlProcessor(SyncModule):
         }
 
     def _handle_npu_dma_in(self, event):
-        if self._gate_by_npu_sync(event):
-            return
         prog_state = self.active_npu_programs.get(event.program)
         if not prog_state:
             raise KeyError(f"Unknown NPU program {event.program}")
@@ -313,8 +319,6 @@ class ControlProcessor(SyncModule):
             self.send_event(dma_evt)
 
     def _handle_npu_cmd(self, event):
-        if self._gate_by_npu_sync(event):
-            return
         program = self.active_npu_programs.get(event.program)
         if not program:
             raise KeyError(f"Unknown NPU program {event.program}")
@@ -342,8 +346,6 @@ class ControlProcessor(SyncModule):
             self.send_event(cmd_evt)
 
     def _handle_npu_dma_out(self, event):
-        if self._gate_by_npu_sync(event):
-            return
         program = self.active_npu_programs.get(event.program)
         if not program:
             raise KeyError(f"Unknown NPU program {event.program}")
