@@ -2,18 +2,22 @@ from sim_core.module import PipelineModule
 from sim_core.event import Event
 
 class DRAM(PipelineModule):
-    """Simple DRAM model with a configurable pipeline latency."""
+    """Simple DRAM model with independent read/write channels."""
 
     def __init__(self, engine, name, mesh_info, pipeline_latency=5, buffer_capacity=4):
-        super().__init__(engine, name, mesh_info, 1, buffer_capacity)
+        # Two stages used as independent pipelines for read and write channels
+        super().__init__(engine, name, mesh_info, 2, buffer_capacity)
         self.pipeline_latency = pipeline_latency
-        self.set_stage_funcs([self._stage_func])
+        funcs = [self._make_stage_func(i) for i in range(2)]
+        self.set_stage_funcs(funcs)
 
-    def _stage_func(self, mod, data):
-        data["remaining"] -= 1
-        if data["remaining"] > 0:
-            return data, 0, True
-        return data, 1, False
+    def _make_stage_func(self, idx):
+        def func(mod, data):
+            data["remaining"] -= 1
+            if data["remaining"] > 0:
+                return data, idx, True
+            return data, self.num_stages, False
+        return func
 
     def handle_event(self, event):
         if event.event_type in ("DMA_WRITE", "DMA_READ"):
@@ -25,7 +29,8 @@ class DRAM(PipelineModule):
             }
             if event.payload.get("need_reply"):
                 op["dst_name"] = event.payload["src_name"]
-            self.add_data(op)
+            stage = 0 if event.event_type == "DMA_READ" else 1
+            self.add_data(op, stage_idx=stage)
         else:
             super().handle_event(event)
 
