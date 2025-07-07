@@ -1,99 +1,69 @@
 # MockSim
 
-MockSim is a minimal event-driven hardware simulator implemented in Python. It integrates with PyTorch modules through simple hooks so neural network layers emit simulated hardware events.
+MockSim is a lightweight event-driven simulator for experimenting with simple hardware pipelines in Python. It integrates with PyTorch so neural network layers can emit hardware events during a forward pass.
 
-## Simulator Architecture
+## Overview
 
-The simulator is composed of a few key building blocks:
+A simulation is built from small modules that communicate via timestamped events. The core components are:
 
-* **Engine** (`sim_core/engine.py`)
-  * Maintains the global cycle counter and delivers queued `Event` objects in timestamp order.
-* **Routers** (`sim_core/router.py`)
-  * Form a 2-D mesh created via `sim_core/mesh.py`.
-  * Forward events through a 4-stage pipeline using virtual channels.
-* **Processing Elements (PEs)** (`sim_hw/pe.py`)
-  * Simulate matrix-multiplication units that communicate with DRAM.
-* **Control Processor (CP)** (`sim_hw/cp.py`)
-  * Coordinates GEMM operations by sending commands to PEs and waits for completion messages.
-* **DRAM** (`sim_hw/dram.py`)
-  * Handles DMA read/write events emitted by PEs and NPUs.
-* **Event Logger** (`sim_core/logger.py`)
-  * Records which event types each module handles every cycle and can plot a
-    timeline showing pipeline activity across modules.
+- **Engine** – advances the global cycle count and delivers events in order.
+- **Routers** – form a 2D mesh to move packets between modules.
+- **Processing Elements** – simulate GEMM units that talk to **DRAM**.
+- **Control Processor (CP)** – issues commands to PEs or NPUs and waits for completion.
+- **Event Logger** – records which module processed which events per cycle and generates an interactive timeline.
 
-## Package Layout
+## Installation
 
-* **`sim_core`** – Core simulation utilities: the engine, event class, router mesh and common module base classes.
-* **`sim_hw`** – Hardware blocks used by the simulator: control processor, processing elements, an NPU and a DRAM model.
-* **`sim_ml`** – Lightweight PyTorch modules and hooks. `llama3_decoder.py` defines a tiny decoder block and `llama3_sim_hook.py` attaches hooks so `nn.Linear` layers trigger GEMM events.
-
-## Running the Example
-
-1. Install PyTorch and related packages (CPU-only is fine):
+1. Install PyTorch (CPU‑only is sufficient):
    ```bash
    pip install torch torchvision torchaudio
    ```
-2. Run the sample script:
+2. Clone this repository and run the tests:
    ```bash
-   python main.py
+   python -m unittest discover tests
    ```
-   The script builds a simple mesh, registers hardware modules and executes a fake decoder block. During the forward pass the hooks inject GEMM events which the simulator processes. After completion an interactive `timeline.html` is generated using Plotly. This timeline visualizes which module processed which events each cycle and allows hovering over a cycle to inspect all overlapping activity.
+   All tests should pass.
 
-## Testing
+## Running the Example
 
-The repository includes a small unittest suite located in the `tests/` directory. Execute the tests with:
+After installing the dependencies, execute:
+
 ```bash
-python -m unittest discover tests
+python main.py
 ```
-Two scenarios are covered:
 
-* **GEMM pipeline** (`tests/test_pipeline.py`) – Validates that a CP can orchestrate GEMM operations across a PE and DRAM, ensuring all DMA and computation events complete.
-* **NPU task flow** (`tests/test_npu.py`) – Drives the new CP logic for coordinating NPUs. It issues DMA in, compute and DMA out events that depend on the completion of prior phases.
+The script builds a small mesh, registers hardware modules and executes a toy decoder block. When the forward pass runs, the hooks inject GEMM events which the simulator processes. Upon completion a `timeline.html` file is generated showing module activity by cycle.
 
-## NPU Task Example
+## NPU Task Flow
 
-The control processor exposes synchronization flags so higher level code can sequence NPU commands.  Each event to the CP may specify:
-
-* `sync_type` – Which previous phase to wait for (`0` = DMA_IN, `1` = CMD, `2` = DMA_OUT).
-* `sync_targets` – Iterable of NPU names that must have reported `_DONE` for the given phase before this event will issue.
-
-Below is a minimal example replicating `tests/test_npu.py`:
+The control processor can coordinate NPUs using synchronization flags. Each event may specify `sync_type` and `sync_targets` so later phases wait for earlier ones to finish. Here is a minimal example:
 
 ```python
 from sim_core.event import Event
 
-# Schedule the DMA input
+# Issue DMA input
 cp.send_event(Event(
-    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_DMA_IN",
-    payload={"program_cycles":3, "in_size":16, "out_size":16,
-            "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
-            "cmd_opcode_cycles":3}
+    src=None,
+    dst=cp,
+    cycle=1,
+    program="prog0",
+    event_type="NPU_DMA_IN",
+    payload={"program_cycles":3, "dma_in_opcode_cycles":2}
 ))
 
-# Compute waits for DMA_IN completion of NPU_0
+# Command waits for DMA_IN on NPU_0
 cp.send_event(Event(
-    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_CMD",
-    payload={"program_cycles":3, "in_size":16, "out_size":16,
-            "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
-            "cmd_opcode_cycles":3, "sync_type":0, "sync_targets":["NPU_0"]}
-))
-
-# DMA_OUT waits for the CMD phase to finish
-cp.send_event(Event(
-    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_DMA_OUT",
-    payload={"program_cycles":3, "in_size":16, "out_size":16,
-            "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
-            "cmd_opcode_cycles":3, "sync_type":1, "sync_targets":["NPU_0"]}
+    src=None,
+    dst=cp,
+    cycle=1,
+    program="prog0",
+    event_type="NPU_CMD",
+    payload={"program_cycles":3, "sync_type":0, "sync_targets":["NPU_0"]}
 ))
 
 engine.run_until_idle()
 ```
 
-After the engine idles you can query `cp.npu_dma_in_opcode_done['prog0']`, `cp.npu_cmd_opcode_done['prog0']` and `cp.npu_dma_out_opcode_done['prog0']` to confirm each phase finished.
+## Additional Example
 
-
-## Uniform Traffic Example
-
-Run `python -m tests.test_traffic.uniform_traffic` to simulate uniform random traffic on a 16x16 mesh.
-The script reports the average waiting time of delivered packets.
-
+Run `python -m tests.test_traffic.uniform_traffic` to simulate uniform random traffic on a 16×16 mesh. The script prints the average waiting time of all delivered packets.
