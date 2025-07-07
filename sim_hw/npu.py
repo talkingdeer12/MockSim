@@ -4,18 +4,21 @@ from sim_core.event import Event
 class NPU(PipelineModule):
     def __init__(self, engine, name, mesh_info, pipeline_stages=5, buffer_capacity=4):
         super().__init__(engine, name, mesh_info, pipeline_stages, buffer_capacity)
+        # Track per-task DMA activity
         self.expected_dma_reads = {}
         self.received_dma_reads = {}
         self.expected_dma_writes = {}
         self.received_dma_writes = {}
-        self.opcode_cycles_remaining = 0
-        self.opcode_total_cycles = 0
-        self.program_identifier = None
-        # Track the module name that issued the current command
-        self.requester_name = None
-        # Map program identifiers to the module that last interacted with them
+
+        # Command execution bookkeeping. ``cmd_queue`` holds pending commands
+        # while ``current_cmd`` tracks the command currently flowing through the
+        # pipeline.
+        self.cmd_queue = []
+        self.current_cmd = None
+
+        # Map (program, task_id) identifiers to the requester module so DONE
+        # events can be routed correctly.
         self.requester_name_by_prog = {}
-        self.cmd_need_reply = False
         funcs = [self._make_stage_func(i) for i in range(pipeline_stages)]
         self.set_stage_funcs(funcs)
 
@@ -28,18 +31,25 @@ class NPU(PipelineModule):
         """Hook called before executing a pipeline stage."""
         pass
 
-    def handle_pipeline_output(self, data):
-        if not self.opcode_total_cycles:
+    def _start_next_cmd(self):
+        """Issue the next command in ``cmd_queue`` if the pipeline is idle."""
+        if self.current_cmd or not self.cmd_queue:
             return
 
-        self.opcode_cycles_remaining -= 1
-        if self.opcode_cycles_remaining == 0:
-            dst_name = data.get(
-                "dst_name",
-                self.requester_name_by_prog.get(
-                    self.program_identifier, self.requester_name
-                ),
-            )
+        info = self.cmd_queue.pop(0)
+        self.current_cmd = {"info": info, "remaining": info["cycles"]}
+        for _ in range(info["cycles"]):
+            self.add_data({}, stage_idx=0)
+
+    def handle_pipeline_output(self, data):
+        """Called when a pipeline token exits the final stage."""
+        if not self.current_cmd:
+            return
+
+        self.current_cmd["remaining"] -= 1
+        if self.current_cmd["remaining"] == 0:
+            info = self.current_cmd["info"]
+            dst_name = info["dst_name"]
             coords = (
                 self.mesh_info.get("cp_coords", {}).get(dst_name)
                 or self.mesh_info.get("pe_coords", {}).get(dst_name)
@@ -51,28 +61,27 @@ class NPU(PipelineModule):
                 dst=self.get_my_router(),
                 cycle=self.engine.current_cycle,
                 data_size=4,
-                program=self.program_identifier,
+                program=info["program"],
                 event_type="NPU_CMD_DONE",
                 payload={
                     "dst_coords": coords,
                     "npu_name": self.name,
+                    "task_id": info.get("task_id"),
                     "input_port": 0,
                     "vc": 0,
                 },
             )
             self.send_event(evt)
-            self.opcode_total_cycles = 0
-            self.program_identifier = None
-            self.requester_name = None
-            self.cmd_need_reply = False
+            self.current_cmd = None
+            self._start_next_cmd()
 
     def handle_event(self, event):
         if event.event_type == "NPU_DMA_IN":
+            key = (event.program, event.payload.get("task_id"))
             total = event.payload["data_size"] // 4
-            self.expected_dma_reads[event.program] = total
-            self.received_dma_reads[event.program] = 0
-            self.requester_name = event.payload["src_name"]
-            self.requester_name_by_prog[event.program] = self.requester_name
+            self.expected_dma_reads[key] = total
+            self.received_dma_reads[key] = 0
+            self.requester_name_by_prog[key] = event.payload["src_name"]
             dram_coords = list(self.mesh_info["dram_coords"].values())[0]
             for i in range(total):
                 read_evt = Event(
@@ -87,15 +96,17 @@ class NPU(PipelineModule):
                         "src_name": self.name,
                         "need_reply": True,
                         "opcode_cycles": event.payload.get("opcode_cycles", 5),
+                        "task_id": event.payload.get("task_id"),
                         "input_port": 0,
                         "vc": 0,
                     },
                 )
                 self.send_event(read_evt)
         elif event.event_type == "DMA_READ_REPLY":
-            self.received_dma_reads[event.program] += 1
-            if self.received_dma_reads[event.program] >= self.expected_dma_reads[event.program]:
-                dst_name = self.requester_name_by_prog.get(event.program, self.requester_name)
+            key = (event.program, event.payload.get("task_id"))
+            self.received_dma_reads[key] += 1
+            if self.received_dma_reads[key] >= self.expected_dma_reads[key]:
+                dst_name = self.requester_name_by_prog.get(key)
                 coords = (
                     self.mesh_info.get("cp_coords", {}).get(dst_name)
                     or self.mesh_info.get("pe_coords", {}).get(dst_name)
@@ -112,33 +123,30 @@ class NPU(PipelineModule):
                     payload={
                         "dst_coords": coords,
                         "npu_name": self.name,
+                        "task_id": event.payload.get("task_id"),
                         "input_port": 0,
                         "vc": 0,
                     },
                 )
                 self.send_event(done_evt)
-                del self.expected_dma_reads[event.program]
-                del self.received_dma_reads[event.program]
+                del self.expected_dma_reads[key]
+                del self.received_dma_reads[key]
         elif event.event_type == "NPU_CMD":
-            cycles = event.payload["opcode_cycles"]
-            self.opcode_cycles_remaining = cycles
-            self.opcode_total_cycles = cycles
-            self.program_identifier = event.program
-            self.requester_name = event.payload["src_name"]
-            self.requester_name_by_prog[event.program] = self.requester_name
-            need_reply = event.payload.get("need_reply", False)
-            for _ in range(cycles):
-                token = {}
-                if need_reply:
-                    token["dst_name"] = self.requester_name
-                self.add_data(token, stage_idx=0)
-            self.cmd_need_reply = need_reply
+            cmd = {
+                "program": event.program,
+                "task_id": event.payload.get("task_id"),
+                "cycles": event.payload["opcode_cycles"],
+                "dst_name": event.payload["src_name"],
+            }
+            self.cmd_queue.append(cmd)
+            self.requester_name_by_prog[(event.program, cmd["task_id"])] = cmd["dst_name"]
+            self._start_next_cmd()
         elif event.event_type == "NPU_DMA_OUT":
+            key = (event.program, event.payload.get("task_id"))
             total = event.payload["data_size"] // 4
-            self.expected_dma_writes[event.program] = total
-            self.received_dma_writes[event.program] = 0
-            self.requester_name = event.payload["src_name"]
-            self.requester_name_by_prog[event.program] = self.requester_name
+            self.expected_dma_writes[key] = total
+            self.received_dma_writes[key] = 0
+            self.requester_name_by_prog[key] = event.payload["src_name"]
             dram_coords = list(self.mesh_info["dram_coords"].values())[0]
             for i in range(total):
                 wr_evt = Event(
@@ -153,15 +161,17 @@ class NPU(PipelineModule):
                         "src_name": self.name,
                         "need_reply": True,
                         "opcode_cycles": event.payload.get("opcode_cycles", 5),
+                        "task_id": event.payload.get("task_id"),
                         "input_port": 0,
                         "vc": 0,
                     },
                 )
                 self.send_event(wr_evt)
         elif event.event_type == "WRITE_REPLY":
-            self.received_dma_writes[event.program] += 1
-            if self.received_dma_writes[event.program] >= self.expected_dma_writes[event.program]:
-                dst_name = self.requester_name_by_prog.get(event.program, self.requester_name)
+            key = (event.program, event.payload.get("task_id"))
+            self.received_dma_writes[key] += 1
+            if self.received_dma_writes[key] >= self.expected_dma_writes[key]:
+                dst_name = self.requester_name_by_prog.get(key)
                 coords = (
                     self.mesh_info.get("cp_coords", {}).get(dst_name)
                     or self.mesh_info.get("pe_coords", {}).get(dst_name)
@@ -178,13 +188,14 @@ class NPU(PipelineModule):
                     payload={
                         "dst_coords": coords,
                         "npu_name": self.name,
+                        "task_id": event.payload.get("task_id"),
                         "input_port": 0,
                         "vc": 0,
                     },
                 )
                 self.send_event(done_evt)
-                del self.expected_dma_writes[event.program]
-                del self.received_dma_writes[event.program]
+                del self.expected_dma_writes[key]
+                del self.received_dma_writes[key]
                 # Do not remove mapping so that future operations can use it
         else:
             super().handle_event(event)

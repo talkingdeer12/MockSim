@@ -27,7 +27,7 @@ def setup_env():
     mesh_info["pe_coords"]["NPU_0"] = (0, 0)
     mesh[(0, 0)].attach_module(npu)
     engine.register_module(npu)
-    dram = DRAM(engine, "DRAM", mesh_info, pipeline_latency=2, buffer_capacity=1)
+    dram = DRAM(engine, "DRAM", mesh_info, pipeline_latency=2, num_channels=4, buffer_capacity=1)
     mesh_info["dram_coords"]["DRAM"] = (1, 0)
     mesh[(1, 0)].attach_module(dram)
     engine.register_module(dram)

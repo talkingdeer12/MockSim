@@ -190,13 +190,50 @@ class SyncModule(HardwareModule):
         done_dict,
         wait_type,
         resume_fn,
+        task_id=None,
     ):
-        """Common logic for handling *_DONE events under synchronization."""
+        """Common logic for handling *_DONE events under synchronization.
+
+        Parameters
+        ----------
+        program : str
+            Program identifier.
+        actor : str
+            Name of the module that completed the phase.
+        active_states : dict
+            Dictionary mapping program names to per-program state.
+        waiting_field : str
+            Field in the per-program state that tracks remaining actors. The
+            value may be either a ``set`` or ``dict`` mapping ``task_id`` to a
+            set.
+        done_dict : dict
+            Boolean flags keyed by program indicating whether the phase has no
+            outstanding work.
+        wait_type : str
+            Name of the phase (e.g. ``"dma_in"``) used for sync logic.
+        resume_fn : callable
+            Function invoked when a sync is released to resume program
+            execution.
+        task_id : optional
+            Generic identifier for the unit of work that generated the
+            ``*_DONE`` event when ``waiting_field`` stores per-task
+            information.
+        """
         state = active_states.get(program)
         if state:
-            state[waiting_field].discard(actor)
-            if state[waiting_field]:
-                return False
+            waiting = state.get(waiting_field)
+            if isinstance(waiting, dict):
+                task_set = waiting.get(task_id)
+                if task_set is not None:
+                    task_set.discard(actor)
+                    if not task_set:
+                        waiting.pop(task_id, None)
+                if waiting:
+                    return False
+            else:
+                waiting.discard(actor)
+                if waiting:
+                    return False
 
         done_dict[program] = True
 

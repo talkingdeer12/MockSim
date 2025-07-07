@@ -2,11 +2,23 @@ from sim_core.module import PipelineModule
 from sim_core.event import Event
 
 class DRAM(PipelineModule):
-    """Simple DRAM model with a configurable pipeline latency."""
+    """DRAM model with multiple independent channels."""
 
-    def __init__(self, engine, name, mesh_info, pipeline_latency=5, buffer_capacity=4):
+    def __init__(
+        self,
+        engine,
+        name,
+        mesh_info,
+        pipeline_latency=5,
+        num_channels=1,
+        buffer_capacity=4,
+    ):
         super().__init__(engine, name, mesh_info, 1, buffer_capacity)
         self.pipeline_latency = pipeline_latency
+        self.num_channels = num_channels
+        self.channel_queues = [[] for _ in range(num_channels)]
+        self.channel_scheduled = [False] * num_channels
+        self.last_channel = -1
         self.set_stage_funcs([self._stage_func])
 
     def _stage_func(self, mod, data):
@@ -15,6 +27,23 @@ class DRAM(PipelineModule):
             return data, 0, True
         return data, 1, False
 
+    def _select_channel(self, op):
+        """Choose a channel for the incoming request."""
+        self.last_channel = (self.last_channel + 1) % self.num_channels
+        return self.last_channel
+
+    def _schedule_channel(self, ch):
+        if not self.channel_scheduled[ch]:
+            evt = Event(
+                src=self,
+                dst=self,
+                cycle=self.engine.current_cycle + 1,
+                event_type="DRAM_CHANNEL",
+                payload={"channel_id": ch},
+            )
+            self.send_event(evt)
+            self.channel_scheduled[ch] = True
+
     def handle_event(self, event):
         if event.event_type in ("DMA_WRITE", "DMA_READ"):
             op = {
@@ -22,10 +51,29 @@ class DRAM(PipelineModule):
                 "program": event.program,
                 "src_name": event.payload["src_name"],
                 "remaining": event.payload.get("opcode_cycles", self.pipeline_latency),
+                "task_id": event.payload.get("task_id"),
             }
             if event.payload.get("need_reply"):
                 op["dst_name"] = event.payload["src_name"]
-            self.add_data(op)
+            ch = self._select_channel(op)
+            print(f"[DRAM] enqueue {op['type']} task={op.get('task_id')} ch={ch} cycle={self.engine.current_cycle}")
+            op["channel_id"] = ch
+            self.channel_queues[ch].append(op)
+            self._schedule_channel(ch)
+        elif event.event_type == "DRAM_CHANNEL":
+            ch = event.payload["channel_id"]
+            self.channel_scheduled[ch] = False
+            if not self.channel_queues[ch]:
+                return
+            op = self.channel_queues[ch][0]
+            op["remaining"] -= 1
+            if op["remaining"] > 0:
+                self._schedule_channel(ch)
+                return
+            self.channel_queues[ch].pop(0)
+            self.handle_pipeline_output(op)
+            if self.channel_queues[ch]:
+                self._schedule_channel(ch)
         else:
             super().handle_event(event)
 
@@ -39,6 +87,9 @@ class DRAM(PipelineModule):
             coords = (self.mesh_info.get("pe_coords", {}).get(dst_name)
                       or self.mesh_info.get("npu_coords", {}).get(dst_name)
                       or self.mesh_info.get("cp_coords", {}).get(dst_name))
+            print(
+                f"[DRAM] complete {op['type']} ch={op.get('channel_id')} task={op.get('task_id')} cycle={self.engine.current_cycle}"
+            )
             reply_event = Event(
                 src=self,
                 dst=self.get_my_router(),
@@ -50,6 +101,8 @@ class DRAM(PipelineModule):
                     "dst_coords": coords,
                     "input_port": 0,
                     "vc": 0,
+                    "task_id": op.get("task_id"),
+                    "channel_id": op.get("channel_id"),
                 },
             )
             self.send_event(reply_event)
