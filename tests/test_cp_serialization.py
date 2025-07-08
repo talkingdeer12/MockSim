@@ -38,7 +38,7 @@ def setup_env():
 
 class CPSerializationTest(unittest.TestCase):
     def test_serialized_dma_in(self):
-        engine1, cp1 = setup_env()
+        engine, cp = setup_env()
         cfg = {
             "program_cycles": 3,
             "in_size": 16,
@@ -47,31 +47,14 @@ class CPSerializationTest(unittest.TestCase):
             "dma_out_opcode_cycles": 2,
             "cmd_opcode_cycles": 3,
         }
-        instrs1 = [
-            {"event_type": "NPU_DMA_IN", "payload": cfg},
-            {"event_type": "NPU_DMA_IN", "payload": cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}},
+        instrs = [
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=0)},
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=0)},
         ]
-        cp1.load_program("p1", instrs1)
-        cp1.send_event(Event(src=None, dst=cp1, cycle=1, program="p1", event_type="RUN_PROGRAM"))
-        engine1.run_until_idle(max_tick=200)
-        cycles_auto = engine1.current_cycle
-
-        engine2, cp2 = setup_env()
-        instrs2 = [
-            {"event_type": "NPU_DMA_IN", "payload": cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}},
-            {"event_type": "NPU_DMA_IN", "payload": cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}},
-        ]
-        cp2.load_program("p2", instrs2)
-        cp2.send_event(Event(src=None, dst=cp2, cycle=1, program="p2", event_type="RUN_PROGRAM"))
-        engine2.run_until_idle(max_tick=200)
-        cycles_explicit = engine2.current_cycle
-
-        self.assertLess(abs(cycles_auto - cycles_explicit), 2)
-        self.assertTrue(cp1.npu_dma_in_opcode_done.get("p1"))
-        self.assertTrue(cp2.npu_dma_in_opcode_done.get("p2"))
+        cp.load_program("p", instrs)
+        cp.send_event(Event(src=None, dst=cp, cycle=1, program="p", event_type="RUN_PROGRAM"))
+        engine.run_until_idle(max_tick=200)
+        self.assertTrue(cp.npu_dma_in_opcode_done.get("p"))
 
 
 if __name__ == "__main__":

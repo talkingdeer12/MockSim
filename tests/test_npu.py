@@ -46,11 +46,9 @@ class NPUTest(unittest.TestCase):
 
         programs = ["prog0"]
         instrs = [
-            {"event_type": "NPU_DMA_IN", "payload": program_cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}},
-            {"event_type": "NPU_CMD", "payload": program_cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["cmd"]}},
-            {"event_type": "NPU_DMA_OUT", "payload": program_cfg},
+            {"event_type": "NPU_DMA_IN", "payload": dict(program_cfg, stream_id=0)},
+            {"event_type": "NPU_CMD", "payload": dict(program_cfg, stream_id=0)},
+            {"event_type": "NPU_DMA_OUT", "payload": dict(program_cfg, stream_id=0)},
         ]
         for idx, prog in enumerate(programs):
             cp.load_program(prog, instrs)

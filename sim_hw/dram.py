@@ -76,13 +76,13 @@ class DRAM(PipelineModule):
             "program": event.program,
             "src_name": event.payload["src_name"],
             "remaining": event.payload.get("opcode_cycles", self.pipeline_latency),
-            "task_id": event.payload.get("task_id"),
+            "stream_id": event.payload.get("stream_id"),
         }
         if event.payload.get("need_reply"):
             op["dst_name"] = event.payload["src_name"]
         ch = self._select_channel(op)
         print(
-            f"[DRAM] enqueue {op['type']} task={op.get('task_id')} ch={ch} cycle={self.engine.current_cycle}"
+            f"[DRAM] enqueue {op['type']} stream={op.get('stream_id')} ch={ch} cycle={self.engine.current_cycle}"
         )
         op["channel_id"] = ch
         self.channel_queues[ch].append(op)
@@ -114,7 +114,7 @@ class DRAM(PipelineModule):
                       or self.mesh_info.get("npu_coords", {}).get(dst_name)
                       or self.mesh_info.get("cp_coords", {}).get(dst_name))
             print(
-                f"[DRAM] complete {op['type']} ch={op.get('channel_id')} task={op.get('task_id')} cycle={self.engine.current_cycle}"
+                f"[DRAM] complete {op['type']} ch={op.get('channel_id')} stream={op.get('stream_id')} cycle={self.engine.current_cycle}"
             )
             reply_event = Event(
                 src=self,
@@ -127,7 +127,7 @@ class DRAM(PipelineModule):
                     "dst_coords": coords,
                     "input_port": 0,
                     "vc": 0,
-                    "task_id": op.get("task_id"),
+                    "stream_id": op.get("stream_id"),
                     "channel_id": op.get("channel_id"),
                 },
             )
