@@ -31,8 +31,11 @@ class HardwareModule:
                     if isinstance(event.payload, dict)
                     else 0
                 )
+                evt_type = event.event_type
+                if isinstance(event.payload, dict) and event.payload.get("op_type"):
+                    evt_type = f"{evt_type}-{event.payload['op_type']}"
                 self.engine.logger.log_event(
-                    self.engine.current_cycle, self.name, stage, event.event_type
+                    self.engine.current_cycle, self.name, stage, evt_type
                 )
             self.handle_event(event)
         finally:

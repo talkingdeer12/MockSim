@@ -38,12 +38,15 @@ class DRAM(PipelineModule):
 
     def _schedule_channel(self, ch):
         if not self.channel_scheduled[ch]:
+            payload = {"channel_id": ch}
+            if self.channel_queues[ch]:
+                payload["op_type"] = self.channel_queues[ch][0]["type"]
             evt = Event(
                 src=self,
                 dst=self,
                 cycle=self.engine.current_cycle + 1,
                 event_type="DRAM_CHANNEL",
-                payload={"channel_id": ch},
+                payload=payload,
             )
             self.send_event(evt)
             self.channel_scheduled[ch] = True
