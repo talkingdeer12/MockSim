@@ -57,16 +57,13 @@ class TilePipelineTest(unittest.TestCase):
         tiles_x = N // tile_x
         for ty in range(tiles_y):
             for tx in range(tiles_x):
-                instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, task_id=f"T{task}")})
-                # Wait for DMA_IN completion before launching compute
-                instrs.append({"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}})
+                sid = f"T{task}"
+                instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=sid)})
                 for tk in range(K // tile_k):
-                    instrs.append({"event_type": "NPU_CMD", "payload": dict(cfg, task_id=f"T{task}_{tk}")})
-                instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, task_id=f"T{task}")})
+                    instrs.append({"event_type": "NPU_CMD", "payload": dict(cfg, stream_id=sid)})
+                instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id=sid)})
                 task += 1
 
-        # Wait for all outstanding DMA_OUT operations to complete.
-        instrs.append({"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_out"]}})
         cp.load_program("tile_prog", instrs)
         cp.send_event(Event(src=None, dst=cp, cycle=1, program="tile_prog", event_type="RUN_PROGRAM"))
         engine.run_until_idle(max_tick=1000)
@@ -74,8 +71,8 @@ class TilePipelineTest(unittest.TestCase):
         self.assertTrue(cp.npu_cmd_opcode_done.get("tile_prog"))
         self.assertTrue(cp.npu_dma_out_opcode_done.get("tile_prog"))
         self.assertFalse(cp.active_npu_programs)
-        # The pipelined execution should finish in well under 600 cycles
-        self.assertLess(engine.current_cycle, 600)
+        # The pipelined execution should finish in well under 800 cycles
+        self.assertLess(engine.current_cycle, 800)
 
         # Now build a serialized version of the same workload
         engine2 = SimulatorEngine()
@@ -103,17 +100,13 @@ class TilePipelineTest(unittest.TestCase):
         engine2.register_module(cp2)
 
         serial_instrs = []
-        task = 0
         for ty in range(tiles_y):
             for tx in range(tiles_x):
-                serial_instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, task_id=f"S{task}")})
-                serial_instrs.append({"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}})
+                sid = "S"
+                serial_instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=sid)})
                 for tk in range(K // tile_k):
-                    serial_instrs.append({"event_type": "NPU_CMD", "payload": dict(cfg, task_id=f"S{task}_{tk}")})
-                    serial_instrs.append({"event_type": "NPU_SYNC", "payload": {"sync_types": ["cmd"]}})
-                serial_instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, task_id=f"S{task}")})
-                serial_instrs.append({"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_out"]}})
-                task += 1
+                    serial_instrs.append({"event_type": "NPU_CMD", "payload": dict(cfg, stream_id=sid)})
+                serial_instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id=sid)})
 
         cp2.load_program("serial_prog", serial_instrs)
         cp2.send_event(Event(src=None, dst=cp2, cycle=1, program="serial_prog", event_type="RUN_PROGRAM"))

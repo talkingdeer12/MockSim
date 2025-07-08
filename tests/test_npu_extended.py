@@ -52,14 +52,10 @@ class NPUExtendedTest(unittest.TestCase):
             "cmd_opcode_cycles": 3,
         }
         instrs = [
-            {"event_type": "NPU_DMA_IN", "payload": cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}},
-            {"event_type": "NPU_CMD", "payload": cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["cmd"]}},
-            {"event_type": "NPU_DMA_IN", "payload": cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}},
-            {"event_type": "NPU_CMD", "payload": cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["cmd"]}},
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="A")},
+            {"event_type": "NPU_CMD", "payload": dict(cfg, stream_id="A")},
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="B")},
+            {"event_type": "NPU_CMD", "payload": dict(cfg, stream_id="B")},
         ]
         cp.load_program("prog_multi", instrs)
         cp.send_event(
@@ -88,8 +84,8 @@ class NPUExtendedTest(unittest.TestCase):
             "cmd_opcode_cycles": 3,
         }
         instrs = [
-            {"event_type": "NPU_DMA_IN", "payload": cfg},
-            {"event_type": "NPU_DMA_OUT", "payload": cfg},
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="A")},
+            {"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id="B")},
         ]
         cp.load_program("prog_concurrent", instrs)
         cp.send_event(
@@ -123,17 +119,11 @@ class NPUExtendedTest(unittest.TestCase):
 
         random.seed(0)
         instrs = []
-        for _ in range(4):
+        for i in range(4):
             if random.random() < 0.5:
-                instrs.append({"event_type": "NPU_DMA_OUT", "payload": cfg})
-                instrs.append(
-                    {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_out"]}}
-                )
+                instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id=f"S{i}")})
             else:
-                instrs.append({"event_type": "NPU_DMA_IN", "payload": cfg})
-                instrs.append(
-                    {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_in"]}}
-                )
+                instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=f"S{i}")})
 
         cp.load_program("prog_random", instrs)
         cp.send_event(
@@ -162,9 +152,8 @@ class NPUExtendedTest(unittest.TestCase):
             "cmd_opcode_cycles": 3,
         }
         instrs = [
-            {"event_type": "NPU_DMA_IN", "payload": cfg},
-            {"event_type": "NPU_DMA_OUT", "payload": cfg},
-            {"event_type": "NPU_SYNC", "payload": {"sync_types": ["dma_out"]}},
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="X")},
+            {"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id="X")},
         ]
         cp.load_program("prog_sync_end", instrs)
         cp.send_event(

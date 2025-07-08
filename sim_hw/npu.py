@@ -16,7 +16,7 @@ class NPU(PipelineModule):
         self.cmd_queue = []
         self.current_cmd = None
 
-        # Map (program, task_id) identifiers to the requester module so DONE
+        # Map (program, stream_id) identifiers to the requester module so DONE
         # events can be routed correctly.
         self.requester_name_by_prog = {}
         funcs = [self._make_stage_func(i) for i in range(pipeline_stages)]
@@ -82,7 +82,7 @@ class NPU(PipelineModule):
                 payload={
                     "dst_coords": coords,
                     "npu_name": self.name,
-                    "task_id": info.get("task_id"),
+                    "stream_id": info.get("stream_id"),
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -102,7 +102,7 @@ class NPU(PipelineModule):
     # Individual event handlers
 
     def _handle_npu_dma_in(self, event):
-        key = (event.program, event.payload.get("task_id"))
+        key = (event.program, event.payload.get("stream_id"))
         total = event.payload["data_size"] // 4
         self.expected_dma_reads[key] = total
         self.received_dma_reads[key] = 0
@@ -121,7 +121,7 @@ class NPU(PipelineModule):
                     "src_name": self.name,
                     "need_reply": True,
                     "opcode_cycles": event.payload.get("opcode_cycles", 5),
-                    "task_id": event.payload.get("task_id"),
+                    "stream_id": event.payload.get("stream_id"),
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -129,7 +129,7 @@ class NPU(PipelineModule):
             self.send_event(read_evt)
 
     def _handle_dma_read_reply(self, event):
-        key = (event.program, event.payload.get("task_id"))
+        key = (event.program, event.payload.get("stream_id"))
         self.received_dma_reads[key] += 1
         if self.received_dma_reads[key] >= self.expected_dma_reads[key]:
             dst_name = self.requester_name_by_prog.get(key)
@@ -149,7 +149,7 @@ class NPU(PipelineModule):
                 payload={
                     "dst_coords": coords,
                     "npu_name": self.name,
-                    "task_id": event.payload.get("task_id"),
+                    "stream_id": event.payload.get("stream_id"),
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -161,16 +161,16 @@ class NPU(PipelineModule):
     def _handle_npu_cmd(self, event):
         cmd = {
             "program": event.program,
-            "task_id": event.payload.get("task_id"),
+            "stream_id": event.payload.get("stream_id"),
             "cycles": event.payload["opcode_cycles"],
             "dst_name": event.payload["src_name"],
         }
         self.cmd_queue.append(cmd)
-        self.requester_name_by_prog[(event.program, cmd["task_id"])] = cmd["dst_name"]
+        self.requester_name_by_prog[(event.program, cmd["stream_id"])] = cmd["dst_name"]
         self._start_next_cmd()
 
     def _handle_npu_dma_out(self, event):
-        key = (event.program, event.payload.get("task_id"))
+        key = (event.program, event.payload.get("stream_id"))
         total = event.payload["data_size"] // 4
         self.expected_dma_writes[key] = total
         self.received_dma_writes[key] = 0
@@ -189,7 +189,7 @@ class NPU(PipelineModule):
                     "src_name": self.name,
                     "need_reply": True,
                     "opcode_cycles": event.payload.get("opcode_cycles", 5),
-                    "task_id": event.payload.get("task_id"),
+                    "stream_id": event.payload.get("stream_id"),
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -197,7 +197,7 @@ class NPU(PipelineModule):
             self.send_event(wr_evt)
 
     def _handle_write_reply(self, event):
-        key = (event.program, event.payload.get("task_id"))
+        key = (event.program, event.payload.get("stream_id"))
         self.received_dma_writes[key] += 1
         if self.received_dma_writes[key] >= self.expected_dma_writes[key]:
             dst_name = self.requester_name_by_prog.get(key)
@@ -217,7 +217,7 @@ class NPU(PipelineModule):
                 payload={
                     "dst_coords": coords,
                     "npu_name": self.name,
-                    "task_id": event.payload.get("task_id"),
+                    "stream_id": event.payload.get("stream_id"),
                     "input_port": 0,
                     "vc": 0,
                 },

@@ -1,8 +1,8 @@
-from sim_core.module import SyncModule
+from sim_core.module import HardwareModule
 from sim_core.event import Event
 
 
-class ControlProcessor(SyncModule):
+class ControlProcessor(HardwareModule):
     def __init__(
         self, engine, name, mesh_info, pes, dram, npus=None, buffer_capacity=4
     ):
@@ -17,13 +17,8 @@ class ControlProcessor(SyncModule):
         self.npu_dma_in_opcode_done = {}
         self.npu_cmd_opcode_done = {}
         self.npu_dma_out_opcode_done = {}
-        # Per-program NPU synchronization state
-        # Each entry keeps a set of remaining phase names and the cycle the sync
-        # was released.  We keep the entry around for one extra cycle so that
-        # events scheduled in the same cycle as the *_DONE that released the
-        # sync are still blocked.
-        # synchronization tracking for NPU operations
-        self.npu_sync_wait = self.sync_wait
+        # DMA structural hazard flag
+        self.dma_busy = False
         # Store control programs and per-program execution state
         self.program_store = {}
         self.program_state = {}
@@ -36,58 +31,77 @@ class ControlProcessor(SyncModule):
         self.event_handlers = {}
         self._register_default_handlers()
 
-    def _resume_program(self, program):
-        state = self.program_state.get(program)
-        if state:
-            state["waiting"] = False
-            resume = Event(
-                src=self,
-                dst=self,
-                cycle=self.engine.current_cycle + 1,
-                program=program,
-                event_type="RUN_PROGRAM",
-            )
-            self.engine.push_event(resume)
-            # Mark the latest issued sync as done
-            board = self.program_scoreboards.get(program)
-            if board:
-                for entry in board["entries"]:
-                    if entry["event_type"] == "NPU_SYNC" and entry["status"] == "issued":
-                        entry["status"] = "done"
-                        break
+    def _schedule_run(self, program):
+        evt = Event(
+            src=self,
+            dst=self,
+            cycle=self.engine.current_cycle + 1,
+            program=program,
+            event_type="RUN_PROGRAM",
+        )
+        self.engine.push_event(evt)
 
-    def _scoreboard_mark_done(self, program, event_type):
+    def _scoreboard_mark_done(self, program, event_type, stream_id):
         board = self.program_scoreboards.get(program)
         if not board:
             return
         for entry in board["entries"]:
-            if entry["event_type"] == event_type and entry["status"] == "issued":
+            if (
+                entry["event_type"] == event_type
+                and entry.get("payload", {}).get("stream_id") == stream_id
+                and entry["status"] == "issued"
+            ):
                 entry["status"] = "done"
                 break
+        # Advance commit pointer
+        while (
+            board["commit"] < len(board["entries"])
+            and board["entries"][board["commit"]]["status"] == "done"
+        ):
+            board["commit"] += 1
 
-    def _has_pending_conflict(self, board, entry):
-        """Check if an earlier instruction of the same type and task_id is not done."""
-        task_id = entry.get("payload", {}).get("task_id")
-        etype = entry["event_type"]
+    def _update_phase_done(
+        self,
+        program,
+        actor,
+        active_states,
+        waiting_field,
+        done_dict,
+        stream_id=None,
+    ):
+        state = active_states.get(program)
+        if state:
+            waiting = state.get(waiting_field)
+            if isinstance(waiting, dict):
+                task_set = waiting.get(stream_id)
+                if task_set is not None:
+                    task_set.discard(actor)
+                    if not task_set:
+                        waiting.pop(stream_id, None)
+                if waiting:
+                    return False
+            else:
+                waiting.discard(actor)
+                if waiting:
+                    return False
+
+        done_dict[program] = True
+        return True
+
+    def _has_stream_dependency(self, board, entry):
+        """Return True if an earlier instruction with the same stream is not done."""
+        sid = entry.get("payload", {}).get("stream_id")
         for e in board["entries"]:
             if e is entry:
                 break
-            if (
-                e["event_type"] == etype
-                and e.get("payload", {}).get("task_id") == task_id
-                and e["status"] != "done"
-            ):
+            if e.get("payload", {}).get("stream_id") == sid and e["status"] != "done":
                 return True
         return False
 
     def _can_issue(self, program, entry, board):
-        if self._has_pending_conflict(board, entry):
+        if self._has_stream_dependency(board, entry):
             return False
-        prog_state = self.active_npu_programs.get(program, {})
-        etype = entry["event_type"]
-        if etype == "NPU_CMD" and prog_state.get("waiting_dma_in"):
-            return False
-        if etype == "NPU_DMA_OUT" and prog_state.get("waiting_op"):
+        if entry["op_type"] in ("read", "write") and self.dma_busy:
             return False
         return True
 
@@ -99,14 +113,14 @@ class ControlProcessor(SyncModule):
         entry["status"] = "issued"
         state["pc"] = entry["id"] + 1
 
-        if etype == "NPU_SYNC":
-            state["waiting"] = True
-        elif etype == "NPU_DMA_IN":
+        if etype == "NPU_DMA_IN":
             self.npu_dma_in_opcode_done[program] = False
+            self.dma_busy = True
         elif etype == "NPU_CMD":
             self.npu_cmd_opcode_done[program] = False
         elif etype == "NPU_DMA_OUT":
             self.npu_dma_out_opcode_done[program] = False
+            self.dma_busy = True
 
         instr_evt = Event(
             src=None,
@@ -116,23 +130,23 @@ class ControlProcessor(SyncModule):
             event_type=etype,
             payload=entry.get("payload", {}),
         )
-        tsk = instr_evt.payload.get("task_id")
+        sid = instr_evt.payload.get("stream_id")
         print(
-            f"[CP] Dispatch {instr_evt.event_type} task={tsk} cycle={self.engine.current_cycle}"
+            f"[CP] Dispatch {instr_evt.event_type} stream={sid} cycle={self.engine.current_cycle}"
         )
         self.engine.push_event(instr_evt)
 
     def _create_program_state(self, payload):
         """Initialize per-program state used to track outstanding work units."""
         return {
-            # Each waiting_* entry maps ``task_id`` -> set of NPU names.
-            # ``task_id`` represents an independent execution stream inside a
+            # Each waiting_* entry maps ``stream_id`` -> set of NPU names.
+            # ``stream_id`` represents an independent execution stream inside a
             # control program, typically corresponding to a logical layer or
-            # iteration.  Multiple task_ids can be in flight, so we track each
-            # task separately to allow interleaving of DMA/compute phases.
+            # iteration.  Multiple streams can be in flight, so we track each
+            # stream separately to allow interleaving of DMA/compute phases.
             #
-            #    [task_id 0] DMA_IN -> CMD -> DMA_OUT
-            #    [task_id 1] DMA_IN -> CMD -> DMA_OUT
+            #    [stream 0] DMA_IN -> CMD -> DMA_OUT
+            #    [stream 1] DMA_IN -> CMD -> DMA_OUT
             #
             # Streams progress independently but share the same program.
             "waiting_dma_in": {},
@@ -151,7 +165,7 @@ class ControlProcessor(SyncModule):
     def load_program(self, name, instructions):
         """Register a list of instructions for sequential execution."""
         self.program_store[name] = instructions
-        self.program_state[name] = {"pc": 0, "waiting": False}
+        self.program_state[name] = {"pc": 0}
         cfg = None
         for instr in instructions:
             payload = instr.get("payload")
@@ -183,7 +197,7 @@ class ControlProcessor(SyncModule):
             elif etype in ("NPU_CMD", "PE_GEMM", "GEMM"):
                 op_type = "compute"
             else:
-                op_type = "sync"
+                op_type = "other"
             entry = {
                 "id": idx,
                 "event_type": etype,
@@ -192,8 +206,6 @@ class ControlProcessor(SyncModule):
                 "status": "pending",
                 "deps": set(),
             }
-            if etype == "NPU_SYNC":
-                entry["deps"] = set(instr.get("payload", {}).get("sync_types", []))
             sb_entries.append(entry)
         self.program_scoreboards[name] = {"entries": sb_entries, "commit": 0}
 
@@ -208,7 +220,6 @@ class ControlProcessor(SyncModule):
         self.register_handler("PE_DMA_IN_DONE", self._handle_pe_dma_in_done)
         self.register_handler("PE_GEMM_DONE", self._handle_pe_gemm_done)
         self.register_handler("PE_DMA_OUT_DONE", self._handle_pe_dma_out_done)
-        self.register_handler("NPU_SYNC", self._handle_npu_sync)
         self.register_handler("NPU_DMA_IN", self._handle_npu_dma_in)
         self.register_handler("NPU_CMD", self._handle_npu_cmd)
         self.register_handler("NPU_DMA_OUT", self._handle_npu_dma_out)
@@ -228,25 +239,13 @@ class ControlProcessor(SyncModule):
 
         # If all instructions completed, retire program
         if all(e["status"] == "done" for e in board["entries"]):
-            if not state.get("waiting"):
-                if (
-                    self.npu_dma_in_opcode_done.get(event.program, True)
-                    and self.npu_cmd_opcode_done.get(event.program, True)
-                    and self.npu_dma_out_opcode_done.get(event.program, True)
-                ):
-                    print(f"[CP] NPU task {event.program} 완료")
-                    self.active_npu_programs.pop(event.program, None)
-            return
-
-        if state.get("waiting"):
-            retry = Event(
-                src=self,
-                dst=self,
-                cycle=self.engine.current_cycle + 1,
-                program=event.program,
-                event_type="RUN_PROGRAM",
-            )
-            self.engine.push_event(retry)
+            if (
+                self.npu_dma_in_opcode_done.get(event.program, True)
+                and self.npu_cmd_opcode_done.get(event.program, True)
+                and self.npu_dma_out_opcode_done.get(event.program, True)
+            ):
+                print(f"[CP] NPU task {event.program} 완료")
+                self.active_npu_programs.pop(event.program, None)
             return
 
         issued = False
@@ -259,15 +258,8 @@ class ControlProcessor(SyncModule):
             issued = True
             break
 
-        if issued or state.get("waiting"):
-            nxt = Event(
-                src=self,
-                dst=self,
-                cycle=self.engine.current_cycle + 1,
-                program=event.program,
-                event_type="RUN_PROGRAM",
-            )
-            self.engine.push_event(nxt)
+        if issued:
+            self._schedule_run(event.program)
 
     def _handle_gemm(self, event):
         print(f"[CP] GEMM 시작: {event.program}, shape={event.payload['gemm_shape']}")
@@ -360,19 +352,12 @@ class ControlProcessor(SyncModule):
         if not state["waiting_dma_out"]:
             print(f"[CP] GEMM {event.program} 작업 완료")
             self.active_gemms.pop(event.program, None)
-
-    def _handle_npu_sync(self, event):
-        self.npu_sync_wait[event.program] = {
-            "types": set(event.payload.get("sync_types", [])),
-            "release_cycle": None,
-        }
-
     def _handle_npu_dma_in(self, event):
         prog_state = self.active_npu_programs.get(event.program)
         if not prog_state:
             raise KeyError(f"Unknown NPU program {event.program}")
-        task_id = event.payload.get("task_id")
-        prog_state.setdefault("waiting_dma_in", {})[task_id] = set(n.name for n in self.npus)
+        sid = event.payload.get("stream_id")
+        prog_state.setdefault("waiting_dma_in", {})[sid] = set(n.name for n in self.npus)
         self.npu_dma_in_opcode_done[event.program] = False
         for npu in self.npus:
             dma_evt = Event(
@@ -388,7 +373,7 @@ class ControlProcessor(SyncModule):
                     "src_name": self.name,
                     "need_reply": True,
                     "opcode_cycles": prog_state["dma_in_opcode_cycles"],
-                    "task_id": task_id,
+                    "stream_id": sid,
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -399,8 +384,8 @@ class ControlProcessor(SyncModule):
         program = self.active_npu_programs.get(event.program)
         if not program:
             raise KeyError(f"Unknown NPU program {event.program}")
-        task_id = event.payload.get("task_id")
-        program.setdefault("waiting_op", {})[task_id] = set(n.name for n in self.npus)
+        sid = event.payload.get("stream_id")
+        program.setdefault("waiting_op", {})[sid] = set(n.name for n in self.npus)
         self.npu_cmd_opcode_done[event.program] = False
         for npu in self.npus:
             cmd_evt = Event(
@@ -415,7 +400,7 @@ class ControlProcessor(SyncModule):
                     "opcode_cycles": program["cmd_opcode_cycles"],
                     "src_name": self.name,
                     "need_reply": True,
-                    "task_id": task_id,
+                    "stream_id": sid,
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -426,8 +411,8 @@ class ControlProcessor(SyncModule):
         program = self.active_npu_programs.get(event.program)
         if not program:
             raise KeyError(f"Unknown NPU program {event.program}")
-        task_id = event.payload.get("task_id")
-        program.setdefault("waiting_dma_out", {})[task_id] = set(n.name for n in self.npus)
+        sid = event.payload.get("stream_id")
+        program.setdefault("waiting_dma_out", {})[sid] = set(n.name for n in self.npus)
         self.npu_dma_out_opcode_done[event.program] = False
         for npu in self.npus:
             out_evt = Event(
@@ -443,7 +428,7 @@ class ControlProcessor(SyncModule):
                     "src_name": self.name,
                     "need_reply": True,
                     "opcode_cycles": program["dma_out_opcode_cycles"],
-                    "task_id": task_id,
+                    "stream_id": sid,
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -451,52 +436,54 @@ class ControlProcessor(SyncModule):
             self.send_event(out_evt)
 
     def _handle_npu_dma_in_done(self, event):
+        sid = event.payload.get("stream_id")
         print(
-            f"[CP] DMA_IN_DONE task={event.payload.get('task_id')} cycle={self.engine.current_cycle}"
+            f"[CP] DMA_IN_DONE stream={sid} cycle={self.engine.current_cycle}"
         )
-        self.process_phase_done(
+        self._update_phase_done(
             event.program,
             event.payload["npu_name"],
             self.active_npu_programs,
             "waiting_dma_in",
             self.npu_dma_in_opcode_done,
-            "dma_in",
-            lambda: self._resume_program(event.program),
-            task_id=event.payload.get("task_id"),
+            stream_id=sid,
         )
-        self._scoreboard_mark_done(event.program, "NPU_DMA_IN")
+        self._scoreboard_mark_done(event.program, "NPU_DMA_IN", sid)
+        self.dma_busy = False
+        self._schedule_run(event.program)
 
     def _handle_npu_cmd_done(self, event):
+        sid = event.payload.get("stream_id")
         print(
-            f"[CP] CMD_DONE task={event.payload.get('task_id')} cycle={self.engine.current_cycle}"
+            f"[CP] CMD_DONE stream={sid} cycle={self.engine.current_cycle}"
         )
-        self.process_phase_done(
+        self._update_phase_done(
             event.program,
             event.payload["npu_name"],
             self.active_npu_programs,
             "waiting_op",
             self.npu_cmd_opcode_done,
-            "cmd",
-            lambda: self._resume_program(event.program),
-            task_id=event.payload.get("task_id"),
+            stream_id=sid,
         )
-        self._scoreboard_mark_done(event.program, "NPU_CMD")
+        self._scoreboard_mark_done(event.program, "NPU_CMD", sid)
+        self._schedule_run(event.program)
 
     def _handle_npu_dma_out_done(self, event):
+        sid = event.payload.get("stream_id")
         print(
-            f"[CP] DMA_OUT_DONE task={event.payload.get('task_id')} cycle={self.engine.current_cycle}"
+            f"[CP] DMA_OUT_DONE stream={sid} cycle={self.engine.current_cycle}"
         )
-        self.process_phase_done(
+        self._update_phase_done(
             event.program,
             event.payload["npu_name"],
             self.active_npu_programs,
             "waiting_dma_out",
             self.npu_dma_out_opcode_done,
-            "dma_out",
-            lambda: self._resume_program(event.program),
-            task_id=event.payload.get("task_id"),
+            stream_id=sid,
         )
-        self._scoreboard_mark_done(event.program, "NPU_DMA_OUT")
+        self._scoreboard_mark_done(event.program, "NPU_DMA_OUT", sid)
+        self.dma_busy = False
+        self._schedule_run(event.program)
 
     def handle_event(self, event):
         handler = self.event_handlers.get(event.event_type)
