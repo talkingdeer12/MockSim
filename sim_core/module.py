@@ -242,13 +242,21 @@ class SyncModule(HardwareModule):
 
         wait = self.sync_wait.get(program)
         should_resume = False
-        if wait and wait_type in wait["types"]:
-            wait["types"].discard(wait_type)
-            if not wait["types"]:
-                wait["release_cycle"] = self.engine.current_cycle
+        if wait:
+            if wait_type in wait["types"]:
+                wait["types"].discard(wait_type)
+                if not wait["types"]:
+                    wait["release_cycle"] = self.engine.current_cycle
+                    should_resume = True
+            elif not wait["types"] and wait.get("release_cycle", -1) < self.engine.current_cycle:
+                # Sync previously released; clean up and resume
+                del self.sync_wait[program]
                 should_resume = True
+            else:
+                # Sync is active for a different phase
+                should_resume = False
         else:
-            # No sync for this phase; still resume so RUN_PROGRAM can check
+            # No sync for this phase; resume so RUN_PROGRAM can check
             should_resume = True
 
         if should_resume:
