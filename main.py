@@ -41,7 +41,8 @@ def main():
         engine.register_module(pe)
         pes.append(pe)
 
-    dram = DRAM(engine, "DRAM", mesh_info)
+    # Use four independent channels in the DRAM model
+    dram = DRAM(engine, "DRAM", mesh_info, num_channels=4)
     mesh[dram_coords_dict["DRAM"]].attach_module(dram)
     engine.register_module(dram)
 
