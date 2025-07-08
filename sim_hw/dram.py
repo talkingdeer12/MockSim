@@ -1,8 +1,50 @@
 from sim_core.module import PipelineModule
 from sim_core.event import Event
 
+
+class DRAMChannel(PipelineModule):
+    """Pipeline for a single DRAM channel.
+
+    Parameters
+    ----------
+    latency : int
+        Number of cycles each operation requires.
+    capacity : int
+        Maximum number of in-flight operations.
+    dram : DRAM
+        Parent DRAM instance used to dispatch completion events.
+    channel_id : int
+        Logical identifier for this channel.
+    """
+
+    def __init__(self, engine, name, mesh_info, latency, capacity, dram, channel_id):
+        super().__init__(engine, name, mesh_info, 1, buffer_capacity=capacity)
+        self.latency = latency
+        self.dram = dram
+        self.channel_id = channel_id
+        self.set_stage_funcs([self._stage])
+
+    def add_op(self, op):
+        op["remaining"] = self.latency
+        self.add_data(op)
+
+    def _stage(self, mod, op):
+        op["remaining"] -= 1
+        if op["remaining"] > 0:
+            return op, 0, True
+        return op, 1, False
+
+    def handle_pipeline_output(self, op):
+        self.dram.channel_complete(self.channel_id, op)
+
 class DRAM(PipelineModule):
-    """DRAM model with multiple independent channels."""
+    """DRAM model supporting multiple independent channels.
+
+    Each :class:`DRAMChannel` has its own request queue and executes DMA
+    operations in a simple one-stage pipeline so up to ``num_channels`` requests
+    can progress simultaneously.  Completed replies include the ``channel_id``
+    responsible for the request so higher level modules can correlate results.
+    """
 
     def __init__(
         self,
@@ -16,40 +58,45 @@ class DRAM(PipelineModule):
         super().__init__(engine, name, mesh_info, 1, buffer_capacity)
         self.pipeline_latency = pipeline_latency
         self.num_channels = num_channels
-        self.channel_queues = [[] for _ in range(num_channels)]
-        self.channel_scheduled = [False] * num_channels
+        self.channels = [
+            DRAMChannel(
+                engine,
+                f"{name}_ch{i}",
+                mesh_info,
+                pipeline_latency,
+                buffer_capacity,
+                self,
+                i,
+            )
+            for i in range(num_channels)
+        ]
+        # Track last channel used per program to distribute load in round-robin
+        # fashion.  Falls back to global round-robin if no program info.
         self.last_channel = -1
-        self.set_stage_funcs([self._stage_func])
+        self._last_chan_by_prog = {}
+        # Unused pipeline stage for compatibility with PipelineModule
+        self.set_stage_funcs([lambda m, d: (d, 1, False)])
 
         # Event dispatch table to make adding new opcodes easy.
         self.event_handlers = {}
         self._register_default_handlers()
 
-    def _stage_func(self, mod, data):
-        data["remaining"] -= 1
-        if data["remaining"] > 0:
-            return data, 0, True
-        return data, 1, False
-
     def _select_channel(self, op):
-        """Choose a channel for the incoming request."""
+        """Choose a channel for the incoming request.
+
+        Uses per-program round-robin scheduling so concurrent programs spread
+        traffic evenly across channels.  If no program is specified, falls back
+        to a global round-robin counter."""
+        prog = op.get("program")
+        if prog is not None:
+            last = self._last_chan_by_prog.get(prog, -1)
+            ch = (last + 1) % self.num_channels
+            self._last_chan_by_prog[prog] = ch
+            return ch
+
         self.last_channel = (self.last_channel + 1) % self.num_channels
         return self.last_channel
 
-    def _schedule_channel(self, ch):
-        if not self.channel_scheduled[ch]:
-            payload = {"channel_id": ch}
-            if self.channel_queues[ch]:
-                payload["op_type"] = self.channel_queues[ch][0]["type"]
-            evt = Event(
-                src=self,
-                dst=self,
-                cycle=self.engine.current_cycle + 1,
-                event_type="DRAM_CHANNEL",
-                payload=payload,
-            )
-            self.send_event(evt)
-            self.channel_scheduled[ch] = True
 
     def register_handler(self, evt_type, fn):
         """Register handler ``fn`` for ``evt_type``."""
@@ -58,7 +105,6 @@ class DRAM(PipelineModule):
     def _register_default_handlers(self):
         self.register_handler("DMA_WRITE", self._handle_dma_access)
         self.register_handler("DMA_READ", self._handle_dma_access)
-        self.register_handler("DRAM_CHANNEL", self._handle_dram_channel)
 
     def handle_event(self, event):
         handler = self.event_handlers.get(event.event_type)
@@ -85,23 +131,12 @@ class DRAM(PipelineModule):
             f"[DRAM] enqueue {op['type']} stream={op.get('stream_id')} ch={ch} cycle={self.engine.current_cycle}"
         )
         op["channel_id"] = ch
-        self.channel_queues[ch].append(op)
-        self._schedule_channel(ch)
+        self.channels[ch].add_op(op)
 
-    def _handle_dram_channel(self, event):
-        ch = event.payload["channel_id"]
-        self.channel_scheduled[ch] = False
-        if not self.channel_queues[ch]:
-            return
-        op = self.channel_queues[ch][0]
-        op["remaining"] -= 1
-        if op["remaining"] > 0:
-            self._schedule_channel(ch)
-            return
-        self.channel_queues[ch].pop(0)
+    def channel_complete(self, ch, op):
+        """Callback from :class:`DRAMChannel` when an operation finishes."""
         self.handle_pipeline_output(op)
-        if self.channel_queues[ch]:
-            self._schedule_channel(ch)
+
 
     def handle_pipeline_output(self, op):
         if op["type"] == "DMA_WRITE":
