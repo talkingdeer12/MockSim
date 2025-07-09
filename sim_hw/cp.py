@@ -4,12 +4,14 @@ from sim_core.event import Event
 
 class ControlProcessor(HardwareModule):
     def __init__(
-        self, engine, name, mesh_info, pes, dram, npus=None, buffer_capacity=4
+        self, engine, name, mesh_info, pes, iod, npus=None, buffer_capacity=4
     ):
         super().__init__(engine, name, mesh_info, buffer_capacity)
         self.pes = pes
         self.npus = npus or []
-        self.dram = dram
+        # ``iod`` represents the memory interface used by NPUs. DRAM remains
+        # intact for PE operations.
+        self.iod = iod
         self.active_gemms = {}
         self.active_npu_programs = {}
         # Track synchronization state of NPU commands so external modules can
@@ -374,6 +376,8 @@ class ControlProcessor(HardwareModule):
                     "need_reply": True,
                     "opcode_cycles": prog_state["dma_in_opcode_cycles"],
                     "stream_id": sid,
+                    "eaddr": event.payload.get("eaddr"),
+                    "iaddr": event.payload.get("iaddr"),
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -429,6 +433,8 @@ class ControlProcessor(HardwareModule):
                     "need_reply": True,
                     "opcode_cycles": program["dma_out_opcode_cycles"],
                     "stream_id": sid,
+                    "eaddr": event.payload.get("eaddr"),
+                    "iaddr": event.payload.get("iaddr"),
                     "input_port": 0,
                     "vc": 0,
                 },

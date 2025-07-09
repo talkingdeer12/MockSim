@@ -2,7 +2,7 @@ from sim_core.module import PipelineModule
 from sim_core.event import Event
 
 class NPU(PipelineModule):
-    def __init__(self, engine, name, mesh_info, pipeline_stages=5, buffer_capacity=4):
+    def __init__(self, engine, name, mesh_info, pipeline_stages=5, buffer_capacity=4, txn_bytes=128):
         super().__init__(engine, name, mesh_info, pipeline_stages, buffer_capacity)
         # Track per-task DMA activity
         self.expected_dma_reads = {}
@@ -26,6 +26,8 @@ class NPU(PipelineModule):
         # operations can be added without editing ``handle_event``.
         self.event_handlers = {}
         self._register_default_handlers()
+        # Maximum size of each memory transaction sent to the IOD.
+        self.txn_bytes = txn_bytes
 
     def _make_stage_func(self, idx):
         def func(mod, data):
@@ -70,6 +72,7 @@ class NPU(PipelineModule):
                 self.mesh_info.get("cp_coords", {}).get(dst_name)
                 or self.mesh_info.get("pe_coords", {}).get(dst_name)
                 or self.mesh_info.get("npu_coords", {}).get(dst_name)
+                or self.mesh_info.get("iod_coords", {}).get(dst_name)
                 or self.mesh_info.get("dram_coords", {}).get(dst_name)
             )
             evt = Event(
@@ -103,25 +106,32 @@ class NPU(PipelineModule):
 
     def _handle_npu_dma_in(self, event):
         key = (event.program, event.payload.get("stream_id"))
-        total = event.payload["data_size"] // 4
-        self.expected_dma_reads[key] = total
+        total_bytes = event.payload["data_size"]
+        self.expected_dma_reads[key] = total_bytes
         self.received_dma_reads[key] = 0
         self.requester_name_by_prog[key] = event.payload["src_name"]
-        dram_coords = list(self.mesh_info["dram_coords"].values())[0]
-        for i in range(total):
+        iod_coords = list(self.mesh_info.get("iod_coords", {}).values())[0]
+
+        txn = self.txn_bytes
+        num_txn = (total_bytes + txn - 1) // txn
+        for i in range(num_txn):
+            size = min(txn, total_bytes - i * txn)
             read_evt = Event(
                 src=self,
                 dst=self.get_my_router(),
                 cycle=self.engine.current_cycle + i,
-                data_size=4,
+                data_size=size,
                 program=event.program,
                 event_type="DMA_READ",
                 payload={
-                    "dst_coords": dram_coords,
+                    "dst_coords": iod_coords,
                     "src_name": self.name,
                     "need_reply": True,
                     "opcode_cycles": event.payload.get("opcode_cycles", 5),
                     "stream_id": event.payload.get("stream_id"),
+                    "eaddr": event.payload.get("eaddr", 0) + i * txn,
+                    "iaddr": event.payload.get("iaddr", 0) + i * txn,
+                    "data_size": size,
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -130,13 +140,15 @@ class NPU(PipelineModule):
 
     def _handle_dma_read_reply(self, event):
         key = (event.program, event.payload.get("stream_id"))
-        self.received_dma_reads[key] += 1
+        size = event.payload.get("data_size", 0)
+        self.received_dma_reads[key] += size
         if self.received_dma_reads[key] >= self.expected_dma_reads[key]:
             dst_name = self.requester_name_by_prog.get(key)
             coords = (
                 self.mesh_info.get("cp_coords", {}).get(dst_name)
                 or self.mesh_info.get("pe_coords", {}).get(dst_name)
                 or self.mesh_info.get("npu_coords", {}).get(dst_name)
+                or self.mesh_info.get("iod_coords", {}).get(dst_name)
                 or self.mesh_info.get("dram_coords", {}).get(dst_name)
             )
             done_evt = Event(
@@ -171,25 +183,31 @@ class NPU(PipelineModule):
 
     def _handle_npu_dma_out(self, event):
         key = (event.program, event.payload.get("stream_id"))
-        total = event.payload["data_size"] // 4
-        self.expected_dma_writes[key] = total
+        total_bytes = event.payload["data_size"]
+        self.expected_dma_writes[key] = total_bytes
         self.received_dma_writes[key] = 0
         self.requester_name_by_prog[key] = event.payload["src_name"]
-        dram_coords = list(self.mesh_info["dram_coords"].values())[0]
-        for i in range(total):
+        iod_coords = list(self.mesh_info.get("iod_coords", {}).values())[0]
+        txn = self.txn_bytes
+        num_txn = (total_bytes + txn - 1) // txn
+        for i in range(num_txn):
+            size = min(txn, total_bytes - i * txn)
             wr_evt = Event(
                 src=self,
                 dst=self.get_my_router(),
                 cycle=self.engine.current_cycle + i,
-                data_size=4,
+                data_size=size,
                 program=event.program,
                 event_type="DMA_WRITE",
                 payload={
-                    "dst_coords": dram_coords,
+                    "dst_coords": iod_coords,
                     "src_name": self.name,
                     "need_reply": True,
                     "opcode_cycles": event.payload.get("opcode_cycles", 5),
                     "stream_id": event.payload.get("stream_id"),
+                    "eaddr": event.payload.get("eaddr", 0) + i * txn,
+                    "iaddr": event.payload.get("iaddr", 0) + i * txn,
+                    "data_size": size,
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -198,13 +216,15 @@ class NPU(PipelineModule):
 
     def _handle_write_reply(self, event):
         key = (event.program, event.payload.get("stream_id"))
-        self.received_dma_writes[key] += 1
+        size = event.payload.get("data_size", 0)
+        self.received_dma_writes[key] += size
         if self.received_dma_writes[key] >= self.expected_dma_writes[key]:
             dst_name = self.requester_name_by_prog.get(key)
             coords = (
                 self.mesh_info.get("cp_coords", {}).get(dst_name)
                 or self.mesh_info.get("pe_coords", {}).get(dst_name)
                 or self.mesh_info.get("npu_coords", {}).get(dst_name)
+                or self.mesh_info.get("iod_coords", {}).get(dst_name)
                 or self.mesh_info.get("dram_coords", {}).get(dst_name)
             )
             done_evt = Event(

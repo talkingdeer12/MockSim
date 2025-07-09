@@ -6,7 +6,7 @@ from sim_core.mesh import create_mesh
 from sim_core.event import Event
 from sim_hw.cp import ControlProcessor
 from sim_hw.npu import NPU
-from sim_hw.dram import DRAM
+from sim_hw.iod import IOD
 
 class TilePipelineTest(unittest.TestCase):
     def test_tile_overlap(self):
@@ -17,7 +17,7 @@ class TilePipelineTest(unittest.TestCase):
             "npu_coords": {},
             "pe_coords": {},
             "cp_coords": {},
-            "dram_coords": {},
+            "iod_coords": {},
         }
         mesh = create_mesh(engine, 3, 1, mesh_info, buffer_capacity=1)
         mesh_info["router_map"] = mesh
@@ -25,11 +25,11 @@ class TilePipelineTest(unittest.TestCase):
         mesh_info["npu_coords"]["NPU_0"] = (0, 0)
         mesh[(0, 0)].attach_module(npu)
         engine.register_module(npu)
-        dram = DRAM(engine, "DRAM", mesh_info, pipeline_latency=2, num_channels=4, buffer_capacity=1)
-        mesh_info["dram_coords"]["DRAM"] = (1, 0)
-        mesh[(1, 0)].attach_module(dram)
-        engine.register_module(dram)
-        cp = ControlProcessor(engine, "CP", mesh_info, [], dram, npus=[npu], buffer_capacity=1)
+        iod = IOD(engine, "IOD", mesh_info, pipeline_latency=2, channels_per_stack=16, buffer_capacity=1)
+        mesh_info["iod_coords"]["IOD"] = (1, 0)
+        mesh[(1, 0)].attach_module(iod)
+        engine.register_module(iod)
+        cp = ControlProcessor(engine, "CP", mesh_info, [], iod, npus=[npu], buffer_capacity=1)
         mesh_info["cp_coords"]["CP"] = (2, 0)
         mesh[(2, 0)].attach_module(cp)
         engine.register_module(cp)
@@ -58,10 +58,10 @@ class TilePipelineTest(unittest.TestCase):
         for ty in range(tiles_y):
             for tx in range(tiles_x):
                 sid = f"T{task}"
-                instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=sid)})
+                instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=sid, eaddr=task*64, iaddr=task*64)})
                 for tk in range(K // tile_k):
                     instrs.append({"event_type": "NPU_CMD", "payload": dict(cfg, stream_id=sid)})
-                instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id=sid)})
+                instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id=sid, eaddr=task*64, iaddr=task*64)})
                 task += 1
 
         cp.load_program("tile_prog", instrs)
@@ -82,7 +82,7 @@ class TilePipelineTest(unittest.TestCase):
             "npu_coords": {},
             "pe_coords": {},
             "cp_coords": {},
-            "dram_coords": {},
+            "iod_coords": {},
         }
         mesh2 = create_mesh(engine2, 3, 1, mesh_info2, buffer_capacity=1)
         mesh_info2["router_map"] = mesh2
@@ -90,11 +90,11 @@ class TilePipelineTest(unittest.TestCase):
         mesh_info2["npu_coords"]["NPU_0"] = (0, 0)
         mesh2[(0, 0)].attach_module(npu2)
         engine2.register_module(npu2)
-        dram2 = DRAM(engine2, "DRAM", mesh_info2, pipeline_latency=2, num_channels=4, buffer_capacity=1)
-        mesh_info2["dram_coords"]["DRAM"] = (1, 0)
-        mesh2[(1, 0)].attach_module(dram2)
-        engine2.register_module(dram2)
-        cp2 = ControlProcessor(engine2, "CP2", mesh_info2, [], dram2, npus=[npu2], buffer_capacity=1)
+        iod2 = IOD(engine2, "IOD", mesh_info2, pipeline_latency=2, channels_per_stack=16, buffer_capacity=1)
+        mesh_info2["iod_coords"]["IOD"] = (1, 0)
+        mesh2[(1, 0)].attach_module(iod2)
+        engine2.register_module(iod2)
+        cp2 = ControlProcessor(engine2, "CP2", mesh_info2, [], iod2, npus=[npu2], buffer_capacity=1)
         mesh_info2["cp_coords"]["CP2"] = (2, 0)
         mesh2[(2, 0)].attach_module(cp2)
         engine2.register_module(cp2)
@@ -103,10 +103,10 @@ class TilePipelineTest(unittest.TestCase):
         for ty in range(tiles_y):
             for tx in range(tiles_x):
                 sid = "S"
-                serial_instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=sid)})
+                serial_instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=sid, eaddr=task*64, iaddr=task*64)})
                 for tk in range(K // tile_k):
                     serial_instrs.append({"event_type": "NPU_CMD", "payload": dict(cfg, stream_id=sid)})
-                serial_instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id=sid)})
+                serial_instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id=sid, eaddr=task*64, iaddr=task*64)})
 
         cp2.load_program("serial_prog", serial_instrs)
         cp2.send_event(Event(src=None, dst=cp2, cycle=1, program="serial_prog", event_type="RUN_PROGRAM"))
