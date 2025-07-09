@@ -11,12 +11,12 @@ The simulator is composed of a few key building blocks:
 * **Routers** (`sim_core/router.py`)
   * Form a 2-D mesh created via `sim_core/mesh.py`.
   * Forward events through a 4-stage pipeline using virtual channels.
-* **Processing Elements (PEs)** (`sim_hw/pe.py`)
-  * Simulate matrix-multiplication units that communicate with DRAM.
+* **Neural Processing Units (NPUs)** (`sim_hw/npu.py`)
+  * Perform compute operations and issue DMA requests to the IOD.
 * **Control Processor (CP)** (`sim_hw/cp.py`)
-  * Coordinates GEMM operations by sending commands to PEs and waits for completion messages.
-* **DRAM** (`sim_hw/dram.py`)
-  * Handles DMA read/write events emitted by PEs and NPUs.
+  * Coordinates DMA and compute phases across one or more NPUs.
+* **IOD** (`sim_hw/iod.py`)
+  * Models stacked HBM memory and services DMA transactions.
 * **Event Logger** (`sim_core/logger.py`)
   * Records which event types each module handles every cycle and can plot a
     timeline showing pipeline activity across modules.
@@ -24,7 +24,7 @@ The simulator is composed of a few key building blocks:
 ## Package Layout
 
 * **`sim_core`** – Core simulation utilities: the engine, event class, router mesh and common module base classes.
-* **`sim_hw`** – Hardware blocks used by the simulator: control processor, processing elements, an NPU and a DRAM model.
+* **`sim_hw`** – Hardware blocks used by the simulator: control processor, NPUs and the IOD memory model.
 * **`sim_ml`** – Lightweight PyTorch modules and hooks. `llama3_decoder.py` defines a tiny decoder block and `llama3_sim_hook.py` attaches hooks so `nn.Linear` layers trigger GEMM events.
 
 ## Running the Example
@@ -45,10 +45,10 @@ The repository includes a small unittest suite located in the `tests/` directory
 ```bash
 python -m unittest discover tests
 ```
-Two scenarios are covered:
+Several scenarios are covered:
 
-* **GEMM pipeline** (`tests/test_pipeline.py`) – Validates that a CP can orchestrate GEMM operations across a PE and DRAM, ensuring all DMA and computation events complete.
-* **NPU task flow** (`tests/test_npu.py`) – Drives the new CP logic for coordinating NPUs. It issues DMA in, compute and DMA out events that depend on the completion of prior phases.
+* **NPU task flow** (`tests/test_npu.py`) – Drives the CP logic for coordinating NPUs.
+* Additional stress tests in `tests/test_npu_extended.py`, `tests/test_tile_pipeline.py` and `tests/test_cp_serialization.py`.
 
 ## NPU Task Example
 

@@ -2,8 +2,8 @@ from sim_core.engine import SimulatorEngine
 from sim_core.mesh import create_mesh
 from sim_core.logger import EventLogger
 from sim_hw.cp import ControlProcessor
-from sim_hw.pe import PE
-from sim_hw.dram import DRAM
+from sim_hw.npu import NPU
+from sim_hw.iod import IOD
 from sim_ml.llama3_decoder import FakeLlama3DecoderBlock
 from sim_ml.llama3_sim_hook import linear_gemm_hook
 import torch
@@ -17,36 +17,32 @@ def main():
     mesh_info = {
         "mesh_size": (x_size, y_size),
         "router_map": None,
-        "pe_coords": {},
+        "npu_coords": {},
         "cp_coords": {},
-        "dram_coords": {},
+        "iod_coords": {},
     }
 
     mesh = create_mesh(engine, x_size, y_size, mesh_info)
     mesh_info["router_map"] = mesh
 
-    pe_coords_list = [(0,0), (1,0), (2,0), (0,1)]
-    cp_coords_dict = {"CP": (2,1)}
-    dram_coords_dict = {"DRAM": (1,1)}
+    npu_coords_list = [(0,0)]
+    cp_coords_dict = {"CP": (1,1)}
+    iod_coords_dict = {"IOD": (0,1)}
 
     mesh_info["cp_coords"] = cp_coords_dict
-    mesh_info["dram_coords"] = dram_coords_dict
+    mesh_info["iod_coords"] = iod_coords_dict
 
-    pes = []
-    for i, coords in enumerate(pe_coords_list):
-        pe_name = f"PE_{i}"
-        mesh_info["pe_coords"][pe_name] = coords
-        pe = PE(engine, pe_name, mesh_info)
-        mesh[coords].attach_module(pe)
-        engine.register_module(pe)
-        pes.append(pe)
+    # Instantiate a single NPU
+    npu = NPU(engine, "NPU_0", mesh_info)
+    mesh_info["npu_coords"]["NPU_0"] = npu_coords_list[0]
+    mesh[npu_coords_list[0]].attach_module(npu)
+    engine.register_module(npu)
 
-    # Use four independent channels in the DRAM model
-    dram = DRAM(engine, "DRAM", mesh_info, num_channels=4)
-    mesh[dram_coords_dict["DRAM"]].attach_module(dram)
-    engine.register_module(dram)
+    iod = IOD(engine, "IOD", mesh_info)
+    mesh[iod_coords_dict["IOD"]].attach_module(iod)
+    engine.register_module(iod)
 
-    cp = ControlProcessor(engine, "CP", mesh_info, pes, dram)
+    cp = ControlProcessor(engine, "CP", mesh_info, npus=[npu])
     mesh[cp_coords_dict["CP"]].attach_module(cp)
     engine.register_module(cp)
 
