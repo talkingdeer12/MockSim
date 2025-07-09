@@ -70,6 +70,7 @@ class NPU(PipelineModule):
                 self.mesh_info.get("cp_coords", {}).get(dst_name)
                 or self.mesh_info.get("pe_coords", {}).get(dst_name)
                 or self.mesh_info.get("npu_coords", {}).get(dst_name)
+                or self.mesh_info.get("iod_coords", {}).get(dst_name)
                 or self.mesh_info.get("dram_coords", {}).get(dst_name)
             )
             evt = Event(
@@ -107,7 +108,8 @@ class NPU(PipelineModule):
         self.expected_dma_reads[key] = total
         self.received_dma_reads[key] = 0
         self.requester_name_by_prog[key] = event.payload["src_name"]
-        dram_coords = list(self.mesh_info["dram_coords"].values())[0]
+        # NPU DMA requests now target the IOD module instead of DRAM.
+        iod_coords = list(self.mesh_info.get("iod_coords", {}).values())[0]
         for i in range(total):
             read_evt = Event(
                 src=self,
@@ -117,11 +119,13 @@ class NPU(PipelineModule):
                 program=event.program,
                 event_type="DMA_READ",
                 payload={
-                    "dst_coords": dram_coords,
+                    "dst_coords": iod_coords,
                     "src_name": self.name,
                     "need_reply": True,
                     "opcode_cycles": event.payload.get("opcode_cycles", 5),
                     "stream_id": event.payload.get("stream_id"),
+                    "eaddr": event.payload.get("eaddr", 0) + i * 4,
+                    "iaddr": event.payload.get("iaddr", 0) + i * 4,
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -137,6 +141,7 @@ class NPU(PipelineModule):
                 self.mesh_info.get("cp_coords", {}).get(dst_name)
                 or self.mesh_info.get("pe_coords", {}).get(dst_name)
                 or self.mesh_info.get("npu_coords", {}).get(dst_name)
+                or self.mesh_info.get("iod_coords", {}).get(dst_name)
                 or self.mesh_info.get("dram_coords", {}).get(dst_name)
             )
             done_evt = Event(
@@ -175,7 +180,7 @@ class NPU(PipelineModule):
         self.expected_dma_writes[key] = total
         self.received_dma_writes[key] = 0
         self.requester_name_by_prog[key] = event.payload["src_name"]
-        dram_coords = list(self.mesh_info["dram_coords"].values())[0]
+        iod_coords = list(self.mesh_info.get("iod_coords", {}).values())[0]
         for i in range(total):
             wr_evt = Event(
                 src=self,
@@ -185,11 +190,13 @@ class NPU(PipelineModule):
                 program=event.program,
                 event_type="DMA_WRITE",
                 payload={
-                    "dst_coords": dram_coords,
+                    "dst_coords": iod_coords,
                     "src_name": self.name,
                     "need_reply": True,
                     "opcode_cycles": event.payload.get("opcode_cycles", 5),
                     "stream_id": event.payload.get("stream_id"),
+                    "eaddr": event.payload.get("eaddr", 0) + i * 4,
+                    "iaddr": event.payload.get("iaddr", 0) + i * 4,
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -205,6 +212,7 @@ class NPU(PipelineModule):
                 self.mesh_info.get("cp_coords", {}).get(dst_name)
                 or self.mesh_info.get("pe_coords", {}).get(dst_name)
                 or self.mesh_info.get("npu_coords", {}).get(dst_name)
+                or self.mesh_info.get("iod_coords", {}).get(dst_name)
                 or self.mesh_info.get("dram_coords", {}).get(dst_name)
             )
             done_evt = Event(

@@ -6,7 +6,7 @@ from sim_core.mesh import create_mesh
 from sim_core.event import Event
 from sim_hw.cp import ControlProcessor
 from sim_hw.npu import NPU
-from sim_hw.dram import DRAM
+from sim_hw.iod import IOD
 
 class NPUTest(unittest.TestCase):
     def test_npu_flow(self):
@@ -17,7 +17,7 @@ class NPUTest(unittest.TestCase):
             "npu_coords": {},
             "pe_coords": {},
             "cp_coords": {},
-            "dram_coords": {},
+            "iod_coords": {},
         }
         mesh = create_mesh(engine, 3, 1, mesh_info, buffer_capacity=1)
         mesh_info["router_map"] = mesh
@@ -26,11 +26,11 @@ class NPUTest(unittest.TestCase):
         mesh_info["pe_coords"]["NPU_0"] = (0,0)
         mesh[(0,0)].attach_module(npu)
         engine.register_module(npu)
-        dram = DRAM(engine, "DRAM", mesh_info, pipeline_latency=2, num_channels=4, buffer_capacity=1)
-        mesh_info["dram_coords"]["DRAM"] = (1,0)
-        mesh[(1,0)].attach_module(dram)
-        engine.register_module(dram)
-        cp = ControlProcessor(engine, "CP", mesh_info, [], dram, npus=[npu], buffer_capacity=1)
+        iod = IOD(engine, "IOD", mesh_info, pipeline_latency=2, channels_per_stack=16, buffer_capacity=1)
+        mesh_info["iod_coords"]["IOD"] = (1,0)
+        mesh[(1,0)].attach_module(iod)
+        engine.register_module(iod)
+        cp = ControlProcessor(engine, "CP", mesh_info, [], iod, npus=[npu], buffer_capacity=1)
         mesh_info["cp_coords"]["CP"] = (2,0)
         mesh[(2,0)].attach_module(cp)
         engine.register_module(cp)
@@ -46,9 +46,9 @@ class NPUTest(unittest.TestCase):
 
         programs = ["prog0"]
         instrs = [
-            {"event_type": "NPU_DMA_IN", "payload": dict(program_cfg, stream_id=0)},
+            {"event_type": "NPU_DMA_IN", "payload": dict(program_cfg, stream_id=0, eaddr=0, iaddr=0)},
             {"event_type": "NPU_CMD", "payload": dict(program_cfg, stream_id=0)},
-            {"event_type": "NPU_DMA_OUT", "payload": dict(program_cfg, stream_id=0)},
+            {"event_type": "NPU_DMA_OUT", "payload": dict(program_cfg, stream_id=0, eaddr=0, iaddr=0)},
         ]
         for idx, prog in enumerate(programs):
             cp.load_program(prog, instrs)
