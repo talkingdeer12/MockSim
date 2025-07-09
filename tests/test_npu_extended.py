@@ -7,7 +7,7 @@ from sim_core.mesh import create_mesh
 from sim_core.event import Event
 from sim_hw.cp import ControlProcessor
 from sim_hw.npu import NPU
-from sim_hw.dram import DRAM
+from sim_hw.iod import IOD
 
 
 def setup_env():
@@ -16,24 +16,20 @@ def setup_env():
         "mesh_size": (3, 1),
         "router_map": None,
         "npu_coords": {},
-        "pe_coords": {},
         "cp_coords": {},
-        "dram_coords": {},
+        "iod_coords": {},
     }
     mesh = create_mesh(engine, 3, 1, mesh_info, buffer_capacity=1)
     mesh_info["router_map"] = mesh
     npu = NPU(engine, "NPU_0", mesh_info, buffer_capacity=1)
     mesh_info["npu_coords"]["NPU_0"] = (0, 0)
-    mesh_info["pe_coords"]["NPU_0"] = (0, 0)
     mesh[(0, 0)].attach_module(npu)
     engine.register_module(npu)
-    dram = DRAM(engine, "DRAM", mesh_info, pipeline_latency=2, num_channels=4, buffer_capacity=1)
-    mesh_info["dram_coords"]["DRAM"] = (1, 0)
-    mesh[(1, 0)].attach_module(dram)
-    engine.register_module(dram)
-    cp = ControlProcessor(
-        engine, "CP", mesh_info, [], dram, npus=[npu], buffer_capacity=1
-    )
+    iod = IOD(engine, "IOD", mesh_info, pipeline_latency=2, channels_per_stack=16, buffer_capacity=1)
+    mesh_info["iod_coords"]["IOD"] = (1, 0)
+    mesh[(1, 0)].attach_module(iod)
+    engine.register_module(iod)
+    cp = ControlProcessor(engine, "CP", mesh_info, npus=[npu], buffer_capacity=1)
     mesh_info["cp_coords"]["CP"] = (2, 0)
     mesh[(2, 0)].attach_module(cp)
     engine.register_module(cp)
@@ -52,9 +48,9 @@ class NPUExtendedTest(unittest.TestCase):
             "cmd_opcode_cycles": 3,
         }
         instrs = [
-            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="A")},
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="A", eaddr=0, iaddr=0)},
             {"event_type": "NPU_CMD", "payload": dict(cfg, stream_id="A")},
-            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="B")},
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="B", eaddr=64, iaddr=64)},
             {"event_type": "NPU_CMD", "payload": dict(cfg, stream_id="B")},
         ]
         cp.load_program("prog_multi", instrs)
@@ -84,8 +80,8 @@ class NPUExtendedTest(unittest.TestCase):
             "cmd_opcode_cycles": 3,
         }
         instrs = [
-            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="A")},
-            {"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id="B")},
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="A", eaddr=0, iaddr=0)},
+            {"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id="B", eaddr=64, iaddr=64)},
         ]
         cp.load_program("prog_concurrent", instrs)
         cp.send_event(
@@ -121,9 +117,9 @@ class NPUExtendedTest(unittest.TestCase):
         instrs = []
         for i in range(4):
             if random.random() < 0.5:
-                instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id=f"S{i}")})
+                instrs.append({"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id=f"S{i}", eaddr=i*64, iaddr=i*64)})
             else:
-                instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=f"S{i}")})
+                instrs.append({"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id=f"S{i}", eaddr=i*64, iaddr=i*64)})
 
         cp.load_program("prog_random", instrs)
         cp.send_event(
@@ -152,8 +148,8 @@ class NPUExtendedTest(unittest.TestCase):
             "cmd_opcode_cycles": 3,
         }
         instrs = [
-            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="X")},
-            {"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id="X")},
+            {"event_type": "NPU_DMA_IN", "payload": dict(cfg, stream_id="X", eaddr=0, iaddr=0)},
+            {"event_type": "NPU_DMA_OUT", "payload": dict(cfg, stream_id="X", eaddr=64, iaddr=64)},
         ]
         cp.load_program("prog_sync_end", instrs)
         cp.send_event(

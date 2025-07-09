@@ -3,14 +3,10 @@ from sim_core.event import Event
 
 
 class ControlProcessor(HardwareModule):
-    def __init__(
-        self, engine, name, mesh_info, pes, dram, npus=None, buffer_capacity=4
-    ):
+    def __init__(self, engine, name, mesh_info, npus=None, buffer_capacity=4):
         super().__init__(engine, name, mesh_info, buffer_capacity)
-        self.pes = pes
         self.npus = npus or []
-        self.dram = dram
-        self.active_gemms = {}
+        # Control programs manage only NPUs.
         self.active_npu_programs = {}
         # Track synchronization state of NPU commands so external modules can
         # poll progress.  Each dict maps a program name to a boolean flag.
@@ -190,11 +186,11 @@ class ControlProcessor(HardwareModule):
         sb_entries = []
         for idx, instr in enumerate(instructions):
             etype = instr["event_type"]
-            if etype in ("NPU_DMA_IN", "PE_DMA_IN"):
+            if etype == "NPU_DMA_IN":
                 op_type = "read"
-            elif etype in ("NPU_DMA_OUT", "PE_DMA_OUT"):
+            elif etype == "NPU_DMA_OUT":
                 op_type = "write"
-            elif etype in ("NPU_CMD", "PE_GEMM", "GEMM"):
+            elif etype == "NPU_CMD":
                 op_type = "compute"
             else:
                 op_type = "other"
@@ -216,10 +212,6 @@ class ControlProcessor(HardwareModule):
 
     def _register_default_handlers(self):
         self.register_handler("RUN_PROGRAM", self._handle_run_program)
-        self.register_handler("GEMM", self._handle_gemm)
-        self.register_handler("PE_DMA_IN_DONE", self._handle_pe_dma_in_done)
-        self.register_handler("PE_GEMM_DONE", self._handle_pe_gemm_done)
-        self.register_handler("PE_DMA_OUT_DONE", self._handle_pe_dma_out_done)
         self.register_handler("NPU_DMA_IN", self._handle_npu_dma_in)
         self.register_handler("NPU_CMD", self._handle_npu_cmd)
         self.register_handler("NPU_DMA_OUT", self._handle_npu_dma_out)
@@ -261,97 +253,6 @@ class ControlProcessor(HardwareModule):
         if issued:
             self._schedule_run(event.program)
 
-    def _handle_gemm(self, event):
-        print(f"[CP] GEMM 시작: {event.program}, shape={event.payload['gemm_shape']}")
-        state = {
-            "waiting_dma_in": set(pe.name for pe in self.pes),
-            "waiting_gemm": set(pe.name for pe in self.pes),
-            "waiting_dma_out": set(pe.name for pe in self.pes),
-            "gemm_shape": event.payload["gemm_shape"],
-            "weights_size": event.payload["weights_size"],
-            "act_size": event.payload["act_size"],
-        }
-        self.active_gemms[event.program] = state
-        for pe in self.pes:
-            dma_evt = Event(
-                src=self,
-                dst=self.get_my_router(),
-                cycle=self.engine.current_cycle,
-                data_size=state["weights_size"] + state["act_size"],
-                program=event.program,
-                event_type="PE_DMA_IN",
-                payload={
-                    "dst_coords": self.mesh_info["pe_coords"][pe.name],
-                    "data_size": state["weights_size"] + state["act_size"],
-                    "src_name": self.name,
-                    "need_reply": True,
-                    "input_port": 0,
-                    "vc": 0,
-                },
-            )
-            self.send_event(dma_evt)
-
-    def _handle_pe_dma_in_done(self, event):
-        state = self.active_gemms.get(event.program)
-        if not state:
-            return
-        pe_name = event.payload["pe_name"]
-        state["waiting_dma_in"].discard(pe_name)
-        if not state["waiting_dma_in"]:
-            for pe in self.pes:
-                gemm_evt = Event(
-                    src=self,
-                    dst=self.get_my_router(),
-                    cycle=self.engine.current_cycle,
-                    data_size=4,
-                    program=event.program,
-                    event_type="PE_GEMM",
-                    payload={
-                        "dst_coords": self.mesh_info["pe_coords"][pe.name],
-                        "gemm_shape": state["gemm_shape"],
-                        "src_name": self.name,
-                        "need_reply": True,
-                        "input_port": 0,
-                        "vc": 0,
-                    },
-                )
-                self.send_event(gemm_evt)
-
-    def _handle_pe_gemm_done(self, event):
-        state = self.active_gemms.get(event.program)
-        if not state:
-            return
-        pe_name = event.payload["pe_name"]
-        state["waiting_gemm"].discard(pe_name)
-        if not state["waiting_gemm"]:
-            out_size = state["gemm_shape"][0] * state["gemm_shape"][1] * 4
-            for pe in self.pes:
-                dma_evt = Event(
-                    src=self,
-                    dst=self.get_my_router(),
-                    cycle=self.engine.current_cycle,
-                    data_size=out_size,
-                    program=event.program,
-                    event_type="PE_DMA_OUT",
-                    payload={
-                        "dst_coords": self.mesh_info["pe_coords"][pe.name],
-                        "data_size": out_size,
-                        "src_name": self.name,
-                        "need_reply": True,
-                        "pe_name": pe.name,
-                    },
-                )
-                self.send_event(dma_evt)
-
-    def _handle_pe_dma_out_done(self, event):
-        state = self.active_gemms.get(event.program)
-        if not state:
-            return
-        pe_name = event.payload["pe_name"]
-        state["waiting_dma_out"].discard(pe_name)
-        if not state["waiting_dma_out"]:
-            print(f"[CP] GEMM {event.program} 작업 완료")
-            self.active_gemms.pop(event.program, None)
     def _handle_npu_dma_in(self, event):
         prog_state = self.active_npu_programs.get(event.program)
         if not prog_state:
@@ -374,6 +275,8 @@ class ControlProcessor(HardwareModule):
                     "need_reply": True,
                     "opcode_cycles": prog_state["dma_in_opcode_cycles"],
                     "stream_id": sid,
+                    "eaddr": event.payload.get("eaddr"),
+                    "iaddr": event.payload.get("iaddr"),
                     "input_port": 0,
                     "vc": 0,
                 },
@@ -429,6 +332,8 @@ class ControlProcessor(HardwareModule):
                     "need_reply": True,
                     "opcode_cycles": program["dma_out_opcode_cycles"],
                     "stream_id": sid,
+                    "eaddr": event.payload.get("eaddr"),
+                    "iaddr": event.payload.get("iaddr"),
                     "input_port": 0,
                     "vc": 0,
                 },
