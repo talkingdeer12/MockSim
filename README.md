@@ -1,99 +1,103 @@
 # MockSim
 
-MockSim is a minimal event-driven hardware simulator implemented in Python. It integrates with PyTorch modules through simple hooks so neural network layers emit simulated hardware events.
+MockSim is a lightweight event-driven hardware simulator written in Python. It hooks into PyTorch modules so that neural network layers can emit hardware events during their forward pass. These events allow the simulator to approximate the behavior of an NPU, memory subsystem and on-chip network.
 
-## Simulator Architecture
+## Key Hardware Components
 
-The simulator is composed of a few key building blocks:
+Each module simplifies real computer architecture features:
 
-* **Engine** (`sim_core/engine.py`)
-  * Maintains the global cycle counter and delivers queued `Event` objects in timestamp order.
-* **Routers** (`sim_core/router.py`)
-  * Form a 2-D mesh created via `sim_core/mesh.py`.
-  * Forward events through a 4-stage pipeline using virtual channels.
-* **Neural Processing Units (NPUs)** (`sim_hw/npu.py`)
-  * Perform compute operations and issue DMA requests to the IOD.
-* **Control Processor (CP)** (`sim_hw/cp.py`)
-  * Coordinates DMA and compute phases across one or more NPUs.
-* **IOD** (`sim_hw/iod.py`)
-  * Models stacked HBM memory and services DMA transactions.
-* **Event Logger** (`sim_core/logger.py`)
-  * Records which event types each module handles every cycle and can plot a
-    timeline showing pipeline activity across modules.
+- **Engine** (`sim_core/engine.py`)
+  - Maintains a global cycle counter and processes every `Event` in timestamp order.
+  - Abstracts hardware behavior through an event-driven model.
+- **Router** (`sim_core/router.py`)
+  - Models a 2D mesh NoC router with four pipeline stages (RC → VA → SA → ST) and multiple virtual channels.
+  - Includes input buffers, a crossbar and VC allocation logic similar to real NoCs.
+- **Neural Processing Unit (NPU)** (`sim_hw/npu.py`)
+  - A small compute engine with a command pipeline.
+  - Reads and writes data via DMA to the IOD memory subsystem and starts the next command once the pipeline is free.
+- **Control Processor (CP)** (`sim_hw/cp.py`)
+  - Orchestrates DMA and compute phases across multiple NPUs.
+  - Maintains per-program scoreboards and supports overlapping work using a `stream_id` for independent work streams.
+  - Roughly models a GPU command processor.
+- **IOD** (`sim_hw/iod.py`)
+  - Simulates a stacked HBM memory controller.
+  - Uses simplified timing parameters (tRP, tRCD, tCL) to calculate access latency.
+- **Event Logger** (`sim_core/logger.py`)
+  - Records which events each module handles every cycle and generates a Plotly timeline of activity.
 
 ## Package Layout
 
-* **`sim_core`** – Core simulation utilities: the engine, event class, router mesh and common module base classes.
-* **`sim_hw`** – Hardware blocks used by the simulator: control processor, NPUs and the IOD memory model.
-* **`sim_ml`** – Lightweight PyTorch modules and hooks. `llama3_decoder.py` defines a tiny decoder block and `llama3_sim_hook.py` attaches hooks so `nn.Linear` layers trigger GEMM events.
+- **`sim_core`** – Engine, event class, router and common module base classes.
+- **`sim_hw`** – CP, NPU, IOD and other hardware blocks.
+- **`sim_ml`** – PyTorch modules and hooks. `llama3_decoder.py` and `llama3_sim_hook.py` are included as examples.
 
 ## Running the Example
 
-1. Install PyTorch and related packages (CPU-only is fine):
+1. Install PyTorch (the CPU version is sufficient).
    ```bash
    pip install torch torchvision torchaudio
    ```
-2. Run the sample script:
+2. Run the sample script.
    ```bash
    python main.py
    ```
-   The script builds a simple mesh, registers hardware modules and executes a fake decoder block. During the forward pass the hooks inject GEMM events which the simulator processes. After completion an interactive `timeline.html` is generated using Plotly. This timeline visualizes which module processed which events each cycle and allows hovering over a cycle to inspect all overlapping activity.
+   The script builds a simple mesh, registers the hardware modules and executes a fake Llama3 decoder block. When it finishes you will find `timeline.html` which visualizes each module's pipeline activity cycle by cycle.
 
-## Testing
+## Adding Events
 
-The repository includes a small unittest suite located in the `tests/` directory. Execute the tests with:
-```bash
-python -m unittest discover tests
-```
-Several scenarios are covered:
-
-* **NPU task flow** (`tests/test_npu.py`) – Drives the CP logic for coordinating NPUs.
-* Additional stress tests in `tests/test_npu_extended.py`, `tests/test_tile_pipeline.py` and `tests/test_cp_serialization.py`.
-
-## NPU Task Example
-
-The control processor exposes synchronization flags so higher level code can sequence NPU commands.  Each event to the CP may specify:
-
-* `sync_type` – Which previous phase to wait for (`0` = DMA_IN, `1` = CMD, `2` = DMA_OUT).
-* `sync_targets` – Iterable of NPU names that must have reported `_DONE` for the given phase before this event will issue.
-
-Below is a minimal example replicating `tests/test_npu.py`:
+Create an `Event` and send it to the target module.
 
 ```python
 from sim_core.event import Event
 
-# Schedule the DMA input
+# Example: schedule a DMA input command for the CP
 cp.send_event(Event(
-    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_DMA_IN",
-    payload={"program_cycles":3, "in_size":16, "out_size":16,
-            "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
-            "cmd_opcode_cycles":3}
+    src=None,
+    dst=cp,
+    cycle=engine.current_cycle + 1,
+    program="prog0",
+    event_type="NPU_DMA_IN",
+    payload={
+        "program_cycles": 3,
+        "in_size": 16,
+        "out_size": 16,
+        "dma_in_opcode_cycles": 2,
+        "dma_out_opcode_cycles": 2,
+        "cmd_opcode_cycles": 3,
+        "stream_id": "A",  # use different IDs to overlap work
+        "eaddr": 0,
+        "iaddr": 0,
+    },
 ))
-
-# Compute waits for DMA_IN completion of NPU_0
-cp.send_event(Event(
-    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_CMD",
-    payload={"program_cycles":3, "in_size":16, "out_size":16,
-            "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
-            "cmd_opcode_cycles":3, "sync_type":0, "sync_targets":["NPU_0"]}
-))
-
-# DMA_OUT waits for the CMD phase to finish
-cp.send_event(Event(
-    src=None, dst=cp, cycle=1, program="prog0", event_type="NPU_DMA_OUT",
-    payload={"program_cycles":3, "in_size":16, "out_size":16,
-            "dma_in_opcode_cycles":2, "dma_out_opcode_cycles":2,
-            "cmd_opcode_cycles":3, "sync_type":1, "sync_targets":["NPU_0"]}
-))
-
-engine.run_until_idle()
 ```
 
-After the engine idles you can query `cp.npu_dma_in_opcode_done['prog0']`, `cp.npu_cmd_opcode_done['prog0']` and `cp.npu_dma_out_opcode_done['prog0']` to confirm each phase finished.
+The `cycle` field specifies when the event should be executed. `send_event` automatically retries later if the destination buffer is full.
 
+## Overlapping Work with `stream_id`
 
-## Uniform Traffic Example
+The CP can handle multiple streams within a single program. Events with the same `stream_id` maintain order, while different IDs proceed independently. This enables tile-based execution or layer pipelining. See `tests/test_tile_pipeline.py` for an example where each tile uses its own `stream_id` to overlap DMA, compute and write-back phases.
 
-Run `python -m tests.test_traffic.uniform_traffic` to simulate uniform random traffic on a 16x16 mesh.
-The script reports the average waiting time of delivered packets.
+## Logging and Timeline Generation
 
+Use `EventLogger` to visualize event flow.
+
+```python
+engine = SimulatorEngine()
+logger = EventLogger()
+engine.set_logger(logger)
+...
+engine.run_until_idle()
+logger.save_html("timeline.html")
+```
+
+Opening the resulting HTML file lets you interactively explore module activity on every cycle.
+
+## Running Tests
+
+A few unit tests are included.
+
+```bash
+python -m unittest discover tests
+```
+
+The tests cover NPU task flow, tile pipelining and random traffic. Ensure they pass after adding new functionality.
