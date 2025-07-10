@@ -36,6 +36,8 @@ class Router(PipelineModule):
         self.vc_rr = [0 for _ in range(num_ports)]
         self.crossbar_busy = [False for _ in range(num_ports)]
         self.sa_last_grant = -1
+        self.credit_counts = [[None for _ in range(num_vcs)]
+                              for _ in range(num_ports)]
 
         self.neighbors = {}
         self.attached_module = None
@@ -97,13 +99,24 @@ class Router(PipelineModule):
             out_port = DIR_INDEX[d]
             in_port = DIR_INDEX[OPPOSITE[d]]
             self.output_links[out_port] = (n, in_port)
+            if isinstance(n, Router):
+                self.credit_counts[out_port] = [n.buffer_capacity for _ in range(self.num_vcs)]
+            else:
+                self.credit_counts[out_port] = [None for _ in range(self.num_vcs)]
 
     def attach_module(self, mod):
         self.attached_module = mod
         self.output_links[DIR_INDEX["LOCAL"]] = (mod, None)
+        self.credit_counts[DIR_INDEX["LOCAL"]] = [None for _ in range(self.num_vcs)]
 
     # ------------------------------------------------------------------
     def handle_event(self, event):
+        if event.event_type == "RECV_CRED":
+            port = event.payload.get("port", 0)
+            vc = event.payload.get("vc", 0)
+            if self.credit_counts[port][vc] is not None:
+                self.credit_counts[port][vc] += 1
+            return
         if event.event_type in ("RETRY_SEND", "PIPE_STAGE"):
             super().handle_event(event)
             return
@@ -183,10 +196,9 @@ class Router(PipelineModule):
             vc_idx = (self.vc_rr[out_port] + i) % self.num_vcs
             if self.output_vc_allocation[out_port][vc_idx] is not None:
                 continue
-            dest, dest_port = self.output_links[out_port] if out_port < len(self.output_links) else (None, None)
-            if isinstance(dest, Router):
-                if dest.buffer_counts[dest_port][vc_idx] >= dest.buffer_capacity:
-                    continue
+            credit = self.credit_counts[out_port][vc_idx]
+            if credit is not None and credit <= 0:
+                continue
             selected_vc = vc_idx
             break
         if selected_vc is None:
@@ -194,6 +206,9 @@ class Router(PipelineModule):
         self.output_vc_allocation[out_port][selected_vc] = event
         self.vc_rr[out_port] = (selected_vc + 1) % self.num_vcs
         event.payload["out_vc"] = selected_vc
+        credit = self.credit_counts[out_port][selected_vc]
+        if credit is not None:
+            self.credit_counts[out_port][selected_vc] -= 1
         return event, self.SA, False
 
     def _stage_sa(self, event):
@@ -223,6 +238,13 @@ class Router(PipelineModule):
         self.send_event(new_event)
 
         self._release_slot({"input_port": in_port, "vc": in_vc})
+        upstream, upstream_port = self.output_links[in_port]
+        if isinstance(upstream, Router):
+            cred_evt = Event(src=self, dst=upstream,
+                             cycle=self.engine.current_cycle,
+                             event_type="RECV_CRED",
+                             payload={"port": upstream_port, "vc": in_vc})
+            upstream._process_event(cred_evt)
         self.output_vc_allocation[out_port][out_vc] = None
         self.crossbar_busy[out_port] = False
 
