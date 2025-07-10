@@ -1,9 +1,43 @@
 from .module import PipelineModule
 from .event import Event
+import random
 
 DIRS = ["LOCAL", "E", "W", "N", "S"]
 DIR_INDEX = {d: i for i, d in enumerate(DIRS)}
 OPPOSITE = {"E": "W", "W": "E", "N": "S", "S": "N", "LOCAL": "LOCAL"}
+
+
+def select_output_vc(router, out_port):
+    """Randomly select an available output VC with credit."""
+    vc_count = router.port_num_vcs[out_port]
+    choices = [
+        vc
+        for vc in range(vc_count)
+        if router.output_vc_allocation[out_port][vc] is None
+        and (
+            router.credit_counts[out_port][vc] is None
+            or router.credit_counts[out_port][vc] > 0
+        )
+    ]
+    if not choices:
+        return None
+    return random.choice(choices)
+
+
+def arbitrate_va(candidates):
+    """Randomly pick one VC for each output (port, vc) pair."""
+    result = {}
+    for pair, vc_list in candidates.items():
+        result[pair] = random.choice(vc_list)
+    return result
+
+
+def arbitrate_sa(candidates):
+    """Randomly choose one candidate per output port."""
+    selected = []
+    for out_port, lst in candidates.items():
+        selected.append(random.choice(lst))
+    return selected
 
 
 class Buffer(PipelineModule):
@@ -83,38 +117,25 @@ class Port(PipelineModule):
         pass
 
     def _stage_va(self, _):
-        used_pairs = {}
-        for i in range(self.num_vcs):
-            vc_idx = (self.vc_rr + i) % self.num_vcs
+        candidates = {}
+        for vc_idx in range(self.num_vcs):
             if not self.va_stage_queues[vc_idx]:
                 continue
             pkt = self.va_stage_queues[vc_idx][0]
             out_port = pkt.payload["out_port"]
-            selected_vc = None
-            out_count = self.router.port_num_vcs[out_port]
-            for j in range(out_count):
-                out_vc = (self.router.vc_rr[out_port] + j) % out_count
-                if self.router.output_vc_allocation[out_port][out_vc] is not None:
-                    continue
-                credit = self.router.credit_counts[out_port][out_vc]
-                if credit is not None and credit <= 0:
-                    continue
-                selected_vc = out_vc
-                break
-            if selected_vc is None:
+            out_vc = select_output_vc(self.router, out_port)
+            if out_vc is None:
                 continue
-            pair = (out_port, selected_vc)
-            if pair not in used_pairs:
-                used_pairs[pair] = vc_idx
+            pair = (out_port, out_vc)
+            candidates.setdefault(pair, []).append(vc_idx)
 
+        chosen = arbitrate_va(candidates)
         progress = False
-        for (out_port, out_vc), vc_idx in used_pairs.items():
+        for (out_port, out_vc), vc_idx in chosen.items():
             if len(self.router.sa_stage_queues[self.port_idx][vc_idx]) >= self.buffer_capacity:
                 continue
             pkt = self.va_stage_queues[vc_idx].pop(0)
             self.router.output_vc_allocation[out_port][out_vc] = pkt
-            out_count = self.router.port_num_vcs[out_port]
-            self.router.vc_rr[out_port] = (out_vc + 1) % out_count
             pkt.payload["out_vc"] = out_vc
             credit = self.router.credit_counts[out_port][out_vc]
             if credit is not None:
@@ -122,7 +143,6 @@ class Port(PipelineModule):
             self.router._add_sa_candidate(self.port_idx, pkt)
             progress = True
 
-        self.vc_rr = (self.vc_rr + 1) % self.num_vcs
         if any(self.va_stage_queues[i] for i in range(self.num_vcs)):
             self._schedule_va()
         return None, self.VA + 1, False
@@ -150,9 +170,6 @@ class Router(PipelineModule):
         # Per-port VC counts; local port has single VC
         self.port_num_vcs = [1] + [num_vcs] * (num_ports - 1)
 
-        # buffer occupancy per [port][vc]
-        self.buffer_counts = [[0 for _ in range(self.port_num_vcs[i])]
-                              for i in range(num_ports)]
 
         # output side resources
         self.output_links = [None for _ in range(num_ports)]  # (dst, dst_port)
@@ -171,8 +188,6 @@ class Router(PipelineModule):
                       for i in range(num_ports)]
         self.sa_stage_queues = [[[] for _ in range(self.port_num_vcs[i])]
                                 for i in range(num_ports)]
-        self.sa_rr_port = 0
-        self.sa_rr_vc = [0 for _ in range(num_ports)]
 
         funcs = [
             lambda m, d: (d, self.SA, False),  # unused RC
@@ -205,23 +220,27 @@ class Router(PipelineModule):
         # no release here; released when packet is forwarded
 
     def _reserve_slot(self, event=None):
-        port = event.payload.get("input_port", 0) if event else 0
-        vc = event.payload.get("vc", 0) if event else 0
-        if self.buffer_counts[port][vc] >= self.buffer_capacity:
-            return False
-        self.buffer_counts[port][vc] += 1
-        return True
+        """Check downstream VC buffer capacity before accepting packet."""
+        if event is None:
+            return True
+        port = event.payload.get("input_port", 0)
+        vc = event.payload.get("vc", 0)
+        buf = self.ports[port].virtual_channels[vc]
+        count = (
+            len(buf.stage_queues[Buffer.RC])
+            + len(self.ports[port].va_stage_queues[vc])
+            + len(self.sa_stage_queues[port][vc])
+        )
+        return count < self.buffer_capacity
 
-    def _release_slot(self, event):
-        port = event.get("input_port", 0)
-        vc = event.get("vc", 0)
-        if self.buffer_counts[port][vc] > 0:
-            self.buffer_counts[port][vc] -= 1
-
-    def can_accept_event(self, event=None):
-        port = event.payload.get("input_port", 0) if event else 0
-        vc = event.payload.get("vc", 0) if event else 0
-        return self.buffer_counts[port][vc] < self.buffer_capacity
+    def _release_slot(self, payload):
+        """Increment credit count when receiving a credit return."""
+        port = payload.get("port")
+        vc = payload.get("vc", 0)
+        if port is None:
+            return
+        if self.credit_counts[port][vc] is not None:
+            self.credit_counts[port][vc] += 1
 
     # ------------------------------------------------------------------
     def set_neighbors(self, neighbor_dict):
@@ -252,10 +271,7 @@ class Router(PipelineModule):
     # ------------------------------------------------------------------
     def handle_event(self, event):
         if event.event_type == "RECV_CRED":
-            port = event.payload.get("port", 0)
-            vc = event.payload.get("vc", 0)
-            if self.credit_counts[port][vc] is not None:
-                self.credit_counts[port][vc] += 1
+            self._release_slot(event.payload)
             return
         if event.event_type in ("RETRY_SEND", "PIPE_STAGE"):
             super().handle_event(event)
@@ -283,28 +299,25 @@ class Router(PipelineModule):
             func(self)
 
     def _stage_sa(self, _):
-        used_out = set()
-        start_port = self.sa_rr_port
-        for i in range(self.num_ports):
-            pidx = (start_port + i) % self.num_ports
-            start_vc = self.sa_rr_vc[pidx]
-            vc_count = self.port_num_vcs[pidx]
-            for j in range(vc_count):
-                vc_idx = (start_vc + j) % vc_count
+        candidates = {}
+        for pidx in range(self.num_ports):
+            for vc_idx in range(self.port_num_vcs[pidx]):
                 if not self.sa_stage_queues[pidx][vc_idx]:
                     continue
                 evt = self.sa_stage_queues[pidx][vc_idx][0]
                 out_port = evt.payload["out_port"]
-                if self.crossbar_busy[out_port] or out_port in used_out:
+                if self.crossbar_busy[out_port]:
                     continue
-                self.sa_stage_queues[pidx][vc_idx].pop(0)
-                self.crossbar_busy[out_port] = True
-                used_out.add(out_port)
-                self.stage_queues[self.ST].append(evt)
-                self._schedule_stage(self.ST)
-                self.sa_rr_vc[pidx] = (vc_idx + 1) % vc_count
-                break
-        self.sa_rr_port = (self.sa_rr_port + 1) % self.num_ports
+                candidates.setdefault(out_port, []).append((pidx, vc_idx, evt))
+
+        winners = arbitrate_sa(candidates)
+        for pidx, vc_idx, evt in winners:
+            out_port = evt.payload["out_port"]
+            self.sa_stage_queues[pidx][vc_idx].pop(0)
+            self.crossbar_busy[out_port] = True
+            self.stage_queues[self.ST].append(evt)
+            self._schedule_stage(self.ST)
+
         more = any(
             self.sa_stage_queues[p][v]
             for p in range(self.num_ports)
@@ -343,7 +356,6 @@ class Router(PipelineModule):
             )
             self._process_event(cred_evt)
 
-        self._release_slot({"input_port": in_port, "vc": in_vc})
         upstream, upstream_port = self.output_links[in_port]
         if isinstance(upstream, Router):
             cred_evt = Event(src=self, dst=upstream,
