@@ -91,8 +91,9 @@ class Port(PipelineModule):
             pkt = self.va_stage_queues[vc_idx][0]
             out_port = pkt.payload["out_port"]
             selected_vc = None
-            for j in range(self.num_vcs):
-                out_vc = (self.router.vc_rr[out_port] + j) % self.num_vcs
+            out_count = self.router.port_num_vcs[out_port]
+            for j in range(out_count):
+                out_vc = (self.router.vc_rr[out_port] + j) % out_count
                 if self.router.output_vc_allocation[out_port][out_vc] is not None:
                     continue
                 credit = self.router.credit_counts[out_port][out_vc]
@@ -112,7 +113,8 @@ class Port(PipelineModule):
                 continue
             pkt = self.va_stage_queues[vc_idx].pop(0)
             self.router.output_vc_allocation[out_port][out_vc] = pkt
-            self.router.vc_rr[out_port] = (out_vc + 1) % self.num_vcs
+            out_count = self.router.port_num_vcs[out_port]
+            self.router.vc_rr[out_port] = (out_vc + 1) % out_count
             pkt.payload["out_vc"] = out_vc
             credit = self.router.credit_counts[out_port][out_vc]
             if credit is not None:
@@ -145,28 +147,30 @@ class Router(PipelineModule):
         self.pipeline_delay = pipeline_delay
         self.num_ports = num_ports
         self.num_vcs = num_vcs
+        # Per-port VC counts; local port has single VC
+        self.port_num_vcs = [1] + [num_vcs] * (num_ports - 1)
 
         # buffer occupancy per [port][vc]
-        self.buffer_counts = [[0 for _ in range(num_vcs)]
-                              for _ in range(num_ports)]
+        self.buffer_counts = [[0 for _ in range(self.port_num_vcs[i])]
+                              for i in range(num_ports)]
 
         # output side resources
         self.output_links = [None for _ in range(num_ports)]  # (dst, dst_port)
-        self.output_vc_allocation = [[None for _ in range(num_vcs)]
-                                     for _ in range(num_ports)]
+        self.output_vc_allocation = [[None for _ in range(self.port_num_vcs[i])]
+                                     for i in range(num_ports)]
         self.vc_rr = [0 for _ in range(num_ports)]
         self.crossbar_busy = [False for _ in range(num_ports)]
-        self.credit_counts = [[None for _ in range(num_vcs)]
-                              for _ in range(num_ports)]
+        self.credit_counts = [[None for _ in range(self.port_num_vcs[i])]
+                              for i in range(num_ports)]
 
         self.neighbors = {}
         self.attached_module = None
 
         # Per-port pipelines
-        self.ports = [Port(self, i, num_vcs, buffer_capacity)
+        self.ports = [Port(self, i, self.port_num_vcs[i], buffer_capacity)
                       for i in range(num_ports)]
-        self.sa_stage_queues = [[[] for _ in range(num_vcs)]
-                                for _ in range(num_ports)]
+        self.sa_stage_queues = [[[] for _ in range(self.port_num_vcs[i])]
+                                for i in range(num_ports)]
         self.sa_rr_port = 0
         self.sa_rr_vc = [0 for _ in range(num_ports)]
 
@@ -226,15 +230,17 @@ class Router(PipelineModule):
             out_port = DIR_INDEX[d]
             in_port = DIR_INDEX[OPPOSITE[d]]
             self.output_links[out_port] = (n, in_port)
+            vc_count = self.port_num_vcs[out_port]
             if isinstance(n, Router):
-                self.credit_counts[out_port] = [n.buffer_capacity for _ in range(self.num_vcs)]
+                self.credit_counts[out_port] = [n.buffer_capacity for _ in range(vc_count)]
             else:
-                self.credit_counts[out_port] = [None for _ in range(self.num_vcs)]
+                self.credit_counts[out_port] = [n.buffer_capacity for _ in range(vc_count)]
 
     def attach_module(self, mod):
         self.attached_module = mod
         self.output_links[DIR_INDEX["LOCAL"]] = (mod, None)
-        self.credit_counts[DIR_INDEX["LOCAL"]] = [None for _ in range(self.num_vcs)]
+        local_vcs = self.port_num_vcs[DIR_INDEX["LOCAL"]]
+        self.credit_counts[DIR_INDEX["LOCAL"]] = [mod.buffer_capacity for _ in range(local_vcs)]
 
     def _add_sa_candidate(self, port_idx, event):
         vc = event.payload.get("vc", 0)
@@ -282,8 +288,9 @@ class Router(PipelineModule):
         for i in range(self.num_ports):
             pidx = (start_port + i) % self.num_ports
             start_vc = self.sa_rr_vc[pidx]
-            for j in range(self.num_vcs):
-                vc_idx = (start_vc + j) % self.num_vcs
+            vc_count = self.port_num_vcs[pidx]
+            for j in range(vc_count):
+                vc_idx = (start_vc + j) % vc_count
                 if not self.sa_stage_queues[pidx][vc_idx]:
                     continue
                 evt = self.sa_stage_queues[pidx][vc_idx][0]
@@ -295,10 +302,14 @@ class Router(PipelineModule):
                 used_out.add(out_port)
                 self.stage_queues[self.ST].append(evt)
                 self._schedule_stage(self.ST)
-                self.sa_rr_vc[pidx] = (vc_idx + 1) % self.num_vcs
+                self.sa_rr_vc[pidx] = (vc_idx + 1) % vc_count
                 break
         self.sa_rr_port = (self.sa_rr_port + 1) % self.num_ports
-        more = any(self.sa_stage_queues[p][v] for p in range(self.num_ports) for v in range(self.num_vcs))
+        more = any(
+            self.sa_stage_queues[p][v]
+            for p in range(self.num_ports)
+            for v in range(self.port_num_vcs[p])
+        )
         if more:
             return None, self.SA, True
         return None, self.ST + 1, False
@@ -320,6 +331,17 @@ class Router(PipelineModule):
                           event_type=event.event_type,
                           payload=event.payload)
         self.send_event(new_event)
+
+        # If sending to local hardware, return credit for this VC immediately
+        if not isinstance(dest, Router):
+            cred_evt = Event(
+                src=self,
+                dst=self,
+                cycle=self.engine.current_cycle,
+                event_type="RECV_CRED",
+                payload={"port": out_port, "vc": out_vc},
+            )
+            self._process_event(cred_evt)
 
         self._release_slot({"input_port": in_port, "vc": in_vc})
         upstream, upstream_port = self.output_links[in_port]
