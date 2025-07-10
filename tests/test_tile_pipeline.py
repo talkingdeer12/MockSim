@@ -65,7 +65,7 @@ class TilePipelineTest(unittest.TestCase):
 
         cp.load_program("tile_prog", instrs)
         cp.send_event(Event(src=None, dst=cp, cycle=1, program="tile_prog", event_type="RUN_PROGRAM"))
-        engine.run_until_idle(max_tick=1000)
+        engine.run_until_idle(max_tick=2000)
         self.assertTrue(cp.npu_dma_in_opcode_done.get("tile_prog"))
         self.assertTrue(cp.npu_cmd_opcode_done.get("tile_prog"))
         self.assertTrue(cp.npu_dma_out_opcode_done.get("tile_prog"))

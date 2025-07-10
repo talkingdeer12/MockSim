@@ -32,5 +32,27 @@ def run_uniform_traffic(x=16, y=16, packets_per_node=20, max_tick=10000):
     return avg
 
 
+def run_uniform_traffic_with_mesh(x=16, y=16, packets_per_node=20, max_tick=10000):
+    """Run uniform traffic and return engine and mesh for inspection."""
+    engine = SimulatorEngine()
+    mesh_info = {"mesh_size": (x, y), "router_map": None}
+    mesh = create_mesh(engine, x, y, mesh_info)
+    mesh_info["router_map"] = mesh
+
+    gens = []
+    for cx in range(x):
+        for cy in range(y):
+            tg = TrafficGenerator(engine, f"TG_{cx}_{cy}", mesh_info, (cx, cy), packets_per_node)
+            mesh[(cx, cy)].attach_module(tg)
+            engine.register_module(tg)
+            tg.start()
+            gens.append(tg)
+
+    engine.run_until_idle(max_tick=max_tick)
+    latencies = [lat for g in gens for lat in g.latencies]
+    avg = sum(latencies) / len(latencies) if latencies else 0
+    return avg, engine, mesh
+
+
 if __name__ == "__main__":
     run_uniform_traffic()
