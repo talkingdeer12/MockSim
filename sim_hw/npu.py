@@ -2,8 +2,8 @@ from sim_core.module import PipelineModule
 from sim_core.event import Event
 
 class NPU(PipelineModule):
-    def __init__(self, engine, name, mesh_info, pipeline_stages=5, buffer_capacity=4, txn_bytes=128):
-        super().__init__(engine, name, mesh_info, pipeline_stages, buffer_capacity)
+    def __init__(self, engine, name, mesh_info, pipeline_stages=5, buffer_capacity=4, txn_bytes=128, frequency=1000):
+        super().__init__(engine, name, mesh_info, pipeline_stages, buffer_capacity, frequency)
         # Track per-task DMA activity
         self.expected_dma_reads = {}
         self.received_dma_reads = {}

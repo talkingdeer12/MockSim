@@ -2,12 +2,13 @@ from .event import Event
 
 
 class HardwareModule:
-    def __init__(self, engine, name, mesh_info, buffer_capacity=4):
+    def __init__(self, engine, name, mesh_info, buffer_capacity=4, frequency=1000):
         self.engine = engine
         self.name = name
         self.mesh_info = mesh_info
         self.buffer_capacity = buffer_capacity
         self.buffer_occupancy = 0
+        self.frequency = frequency  # MHz
 
     # Credit based buffer bookkeeping
     def _reserve_slot(self, event=None):
@@ -66,8 +67,8 @@ class HardwareModule:
 class PipelineModule(HardwareModule):
     """Base class for modules with event driven pipelined execution."""
 
-    def __init__(self, engine, name, mesh_info, num_stages, buffer_capacity=4):
-        super().__init__(engine, name, mesh_info, buffer_capacity)
+    def __init__(self, engine, name, mesh_info, num_stages, buffer_capacity=4, frequency=1000):
+        super().__init__(engine, name, mesh_info, buffer_capacity, frequency)
         self.num_stages = num_stages
         self.stage_funcs = [lambda m, d: (d, i + 1, False) for i in range(num_stages)]
         self.stage_queues = [list() for _ in range(num_stages)]
