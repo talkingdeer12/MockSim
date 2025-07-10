@@ -5,6 +5,87 @@ DIRS = ["LOCAL", "E", "W", "N", "S"]
 DIR_INDEX = {d: i for i, d in enumerate(DIRS)}
 OPPOSITE = {"E": "W", "W": "E", "N": "S", "S": "N", "LOCAL": "LOCAL"}
 
+
+class Port(PipelineModule):
+    """Input port pipeline handling RC and VA for a router."""
+
+    RC = 0
+    VA = 1
+
+    def __init__(self, router, port_idx, num_vcs, buffer_capacity):
+        super().__init__(router.engine, f"{router.name}_P{port_idx}",
+                         router.mesh_info, 2, buffer_capacity, router.frequency)
+        self.router = router
+        self.port_idx = port_idx
+        self.num_vcs = num_vcs
+        self.vc_queues = [[] for _ in range(num_vcs)]
+        self.vc_rr = 0
+        funcs = [lambda m, d: m._stage_rc(d), lambda m, d: m._stage_va(d)]
+        self.set_stage_funcs(funcs)
+
+    # Receive packet from router
+    def recv_packet(self, event):
+        vc = event.payload.get("vc", 0)
+        self.vc_queues[vc].append(event)
+        if not any(self.stage_queues):
+            self._try_schedule()
+
+    def _try_schedule(self):
+        for i in range(self.num_vcs):
+            vc_idx = (self.vc_rr + i) % self.num_vcs
+            if self.vc_queues[vc_idx]:
+                evt = self.vc_queues[vc_idx].pop(0)
+                self.vc_rr = (vc_idx + 1) % self.num_vcs
+                self.add_data(evt, stage_idx=self.RC)
+                break
+
+    def handle_pipeline_output(self, event):
+        self.router._add_sa_candidate(self.port_idx, event)
+        self._try_schedule()
+
+    # RC and VA are mostly lifted from the old Router implementation
+    def _stage_rc(self, event):
+        dst_coords = event.payload.get("dst_coords")
+        if dst_coords is None:
+            raise ValueError(f"[{self.router.name}] dst_coords missing in payload")
+        if (self.router.x, self.router.y) == tuple(dst_coords):
+            direction = "LOCAL"
+        else:
+            dx = dst_coords[0] - self.router.x
+            dy = dst_coords[1] - self.router.y
+            if dx != 0:
+                direction = "E" if dx > 0 else "W"
+            elif dy != 0:
+                direction = "S" if dy > 0 else "N"
+            else:
+                direction = "LOCAL"
+        out_port = DIR_INDEX[direction]
+        event.payload["out_port"] = out_port
+        return event, self.VA, False
+
+    def _stage_va(self, event):
+        out_port = event.payload["out_port"]
+        selected_vc = None
+        for i in range(self.num_vcs):
+            vc_idx = (self.router.vc_rr[out_port] + i) % self.num_vcs
+            if self.router.output_vc_allocation[out_port][vc_idx] is not None:
+                continue
+            credit = self.router.credit_counts[out_port][vc_idx]
+            if credit is not None and credit <= 0:
+                continue
+            selected_vc = vc_idx
+            break
+        if selected_vc is None:
+            return event, self.VA, True
+        self.router.output_vc_allocation[out_port][selected_vc] = event
+        self.router.vc_rr[out_port] = (selected_vc + 1) % self.num_vcs
+        event.payload["out_vc"] = selected_vc
+        credit = self.router.credit_counts[out_port][selected_vc]
+        if credit is not None:
+            self.router.credit_counts[out_port][selected_vc] -= 1
+        return event, self.VA + 1, False
+
+
 class Router(PipelineModule):
     """Simple high-radix router with virtual-channel based 4-stage pipeline."""
 
@@ -42,16 +123,21 @@ class Router(PipelineModule):
         self.neighbors = {}
         self.attached_module = None
 
+        # Per-port pipelines
+        self.ports = [Port(self, i, num_vcs, buffer_capacity)
+                      for i in range(num_ports)]
+        self.sa_candidates = [[] for _ in range(num_ports)]
+        self.sa_rr_port = 0
+
         funcs = [
-            lambda m, d: Router._stage_rc(m, d),
-            lambda m, d: Router._stage_va(m, d),
+            lambda m, d: (d, self.SA, False),  # unused RC
+            lambda m, d: (d, self.SA, False),  # unused VA
             lambda m, d: Router._stage_sa(m, d),
             lambda m, d: Router._stage_st(m, d),
         ]
         self.set_stage_funcs(funcs)
 
         self.on_stage_funcs = [lambda m: None for _ in range(self.num_stages)]
-        self.on_stage_funcs[self.SA] = Router._prep_sa
 
     # ------------------------------------------------------------------
     # basic infrastructure overrides
@@ -109,6 +195,12 @@ class Router(PipelineModule):
         self.output_links[DIR_INDEX["LOCAL"]] = (mod, None)
         self.credit_counts[DIR_INDEX["LOCAL"]] = [None for _ in range(self.num_vcs)]
 
+    def _add_sa_candidate(self, port_idx, event):
+        self.sa_candidates[port_idx].append(event)
+        if not self.stage_queues[self.SA]:
+            self.stage_queues[self.SA].append(None)
+        self._schedule_stage(self.SA)
+
     # ------------------------------------------------------------------
     def handle_event(self, event):
         if event.event_type == "RECV_CRED":
@@ -121,8 +213,9 @@ class Router(PipelineModule):
             super().handle_event(event)
             return
 
-        # normal incoming packet becomes a pipeline task
-        self.add_data(event, stage_idx=0)
+        # incoming packet is queued to the appropriate port
+        port_idx = event.payload.get("input_port", 0)
+        self.ports[port_idx].recv_packet(event)
 
     # Override to avoid buffer checks for internal stage events
     def _schedule_stage(self, idx):
@@ -141,83 +234,29 @@ class Router(PipelineModule):
         if func is not None:
             func(self)
 
-    def _prep_sa(self):
-        if not self.stage_queues[self.SA]:
-            return
-        candidates = {}
-        for i, evt in enumerate(self.stage_queues[self.SA]):
-            out_port = evt.payload.get("out_port")
-            if out_port is None:
-                continue
-            if self.crossbar_busy[out_port]:
-                continue
-            if out_port not in candidates:
-                candidates[out_port] = i
-        if not candidates:
-            return
-        start = (self.sa_last_grant + 1) % self.num_ports
-        selected_port = None
+    def _stage_sa(self, _):
+        made_progress = False
+        used_out = set()
+        start = self.sa_rr_port
         for i in range(self.num_ports):
             port_idx = (start + i) % self.num_ports
-            if port_idx in candidates:
-                selected_port = port_idx
-                break
-        if selected_port is None:
-            selected_port = next(iter(candidates))
-        select_idx = candidates[selected_port]
-        if select_idx != 0:
-            chosen = self.stage_queues[self.SA].pop(select_idx)
-            self.stage_queues[self.SA].insert(0, chosen)
-
-    # ------------------------------------------------------------------
-    # pipeline stage implementations
-    def _stage_rc(self, event):
-        dst_coords = event.payload.get("dst_coords")
-        if dst_coords is None:
-            raise ValueError(f"[{self.name}] dst_coords missing in payload")
-        if (self.x, self.y) == tuple(dst_coords):
-            direction = "LOCAL"
-        else:
-            dx = dst_coords[0] - self.x
-            dy = dst_coords[1] - self.y
-            if dx != 0:
-                direction = "E" if dx > 0 else "W"
-            elif dy != 0:
-                direction = "S" if dy > 0 else "N"
-            else:
-                direction = "LOCAL"
-        out_port = DIR_INDEX[direction]
-        event.payload["out_port"] = out_port
-        return event, self.VA, False
-    def _stage_va(self, event):
-        out_port = event.payload["out_port"]
-        selected_vc = None
-        for i in range(self.num_vcs):
-            vc_idx = (self.vc_rr[out_port] + i) % self.num_vcs
-            if self.output_vc_allocation[out_port][vc_idx] is not None:
+            if not self.sa_candidates[port_idx]:
                 continue
-            credit = self.credit_counts[out_port][vc_idx]
-            if credit is not None and credit <= 0:
+            evt = self.sa_candidates[port_idx][0]
+            out_port = evt.payload["out_port"]
+            if self.crossbar_busy[out_port] or out_port in used_out:
                 continue
-            selected_vc = vc_idx
-            break
-        if selected_vc is None:
-            return event, self.VA, True  # stall
-        self.output_vc_allocation[out_port][selected_vc] = event
-        self.vc_rr[out_port] = (selected_vc + 1) % self.num_vcs
-        event.payload["out_vc"] = selected_vc
-        credit = self.credit_counts[out_port][selected_vc]
-        if credit is not None:
-            self.credit_counts[out_port][selected_vc] -= 1
-        return event, self.SA, False
-
-    def _stage_sa(self, event):
-        out_port = event.payload["out_port"]
-        if self.crossbar_busy[out_port]:
-            return event, self.SA, True
-        self.crossbar_busy[out_port] = True
-        self.sa_last_grant = out_port
-        return event, self.ST, False
+            self.sa_candidates[port_idx].pop(0)
+            self.crossbar_busy[out_port] = True
+            used_out.add(out_port)
+            self.stage_queues[self.ST].append(evt)
+            self._schedule_stage(self.ST)
+            made_progress = True
+        self.sa_rr_port = (self.sa_rr_port + 1) % self.num_ports
+        more = any(q for q in self.sa_candidates)
+        if more:
+            return None, self.SA, True
+        return None, self.ST + 1, False
 
     def _stage_st(self, event):
         in_port = event.payload.get("input_port", 0)
