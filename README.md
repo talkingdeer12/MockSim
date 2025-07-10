@@ -9,6 +9,9 @@ Each module simplifies real computer architecture features:
 - **Engine** (`sim_core/engine.py`)
   - Maintains a global cycle counter and processes every `Event` in timestamp order.
   - Abstracts hardware behavior through an event-driven model.
+  - Each module registers a clock `frequency` (in MHz). When an event is scheduled,
+    the engine converts source cycles to time and back to destination cycles so
+    components with different clocks interoperate correctly.
 - **Router** (`sim_core/router.py`)
   - Models a 2D mesh NoC router with four pipeline stages (RC → VA → SA → ST) and multiple virtual channels.
   - Includes input buffers, a crossbar and VC allocation logic similar to real NoCs.

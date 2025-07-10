@@ -16,8 +16,8 @@ class Router(PipelineModule):
 
     def __init__(self, engine, name, mesh_x, mesh_y, mesh_info,
                  bitwidth=256, pipeline_delay=4,
-                 num_ports=5, num_vcs=2, buffer_capacity=4):
-        super().__init__(engine, name, mesh_info, 4, buffer_capacity)
+                 num_ports=5, num_vcs=2, buffer_capacity=4, frequency=1000):
+        super().__init__(engine, name, mesh_info, 4, buffer_capacity, frequency)
         self.x = mesh_x
         self.y = mesh_y
         self.bitwidth = bitwidth

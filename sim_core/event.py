@@ -14,11 +14,12 @@ class Event:
         # same cycle.  Higher priority events (lower value) will be popped from
         # the queue first.
         self.priority = priority
+        self.time = 0.0  # filled by SimulatorEngine when scheduled
 
     def __lt__(self, other):
-        if self.cycle == other.cycle:
+        if self.time == other.time:
             return self.priority < other.priority
-        return self.cycle < other.cycle
+        return self.time < other.time
 
     def handle(self):
         if self.dst is not None:

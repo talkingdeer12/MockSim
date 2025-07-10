@@ -1,11 +1,11 @@
 from .router import Router
 
-def create_mesh(engine, x_size, y_size, mesh_info, buffer_capacity=4, num_vcs=2):
+def create_mesh(engine, x_size, y_size, mesh_info, buffer_capacity=4, num_vcs=2, frequency=1000):
     mesh = {}
     for x in range(x_size):
         for y in range(y_size):
             name = f"Router_{x}_{y}"
-            router = Router(engine, name, x, y, mesh_info, buffer_capacity=buffer_capacity, num_vcs=num_vcs)
+            router = Router(engine, name, x, y, mesh_info, buffer_capacity=buffer_capacity, num_vcs=num_vcs, frequency=frequency)
             mesh[(x, y)] = router
             engine.register_module(router)
     for x in range(x_size):

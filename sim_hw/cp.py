@@ -3,8 +3,8 @@ from sim_core.event import Event
 
 
 class ControlProcessor(HardwareModule):
-    def __init__(self, engine, name, mesh_info, npus=None, buffer_capacity=4):
-        super().__init__(engine, name, mesh_info, buffer_capacity)
+    def __init__(self, engine, name, mesh_info, npus=None, buffer_capacity=4, frequency=1000):
+        super().__init__(engine, name, mesh_info, buffer_capacity, frequency)
         self.npus = npus or []
         # Control programs manage only NPUs.
         self.active_npu_programs = {}

@@ -63,8 +63,9 @@ class IOD(PipelineModule):
         tRP=1,
         tRCD=2,
         tCL=1,
+        frequency=1000,
     ):
-        super().__init__(engine, name, mesh_info, 1, buffer_capacity)
+        super().__init__(engine, name, mesh_info, 1, buffer_capacity, frequency)
         self.pipeline_latency = pipeline_latency
         self.num_stacks = num_stacks
         self.channels_per_stack = channels_per_stack
