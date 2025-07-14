@@ -48,7 +48,7 @@ class Buffer(PipelineModule):
     def __init__(self, port, vc_idx, capacity):
         router = port.router
         name = f"{router.name}_P{port.port_idx}_VC{vc_idx}"
-        super().__init__(router.engine, name, router.mesh_info, 1, capacity, router.frequency, stage_capacity=None)
+        super().__init__(router.engine, name, router.mesh_info, 1, capacity, router.frequency)
         self.port = port
         self.vc_idx = vc_idx
         self.set_stage_funcs([lambda m, d: m._stage_rc(d)])
@@ -80,6 +80,8 @@ class Buffer(PipelineModule):
         event.payload["out_port"] = out_port
 
         q = self.port.va_stage_queues[self.vc_idx]
+        if len(q) >= self.port.buffer_capacity:
+            return event, self.RC, True
         q.append(event)
         self.port._schedule_va()
         return event, self.RC + 1, False
@@ -91,15 +93,8 @@ class Port(PipelineModule):
     VA = 0
 
     def __init__(self, router, port_idx, num_vcs, buffer_capacity):
-        super().__init__(
-            router.engine,
-            f"{router.name}_P{port_idx}",
-            router.mesh_info,
-            1,
-            buffer_capacity,
-            router.frequency,
-            stage_capacity=None,
-        )
+        super().__init__(router.engine, f"{router.name}_P{port_idx}",
+                         router.mesh_info, 1, buffer_capacity, router.frequency)
         self.router = router
         self.port_idx = port_idx
         self.num_vcs = num_vcs
@@ -137,6 +132,8 @@ class Port(PipelineModule):
         chosen = arbitrate_va(candidates)
         progress = False
         for (out_port, out_vc), vc_idx in chosen.items():
+            if len(self.router.sa_stage_queues[self.port_idx][vc_idx]) >= self.buffer_capacity:
+                continue
             pkt = self.va_stage_queues[vc_idx].pop(0)
             self.router.output_vc_allocation[out_port][out_vc] = pkt
             pkt.payload["out_vc"] = out_vc
@@ -164,7 +161,7 @@ class Router(PipelineModule):
     def __init__(self, engine, name, mesh_x, mesh_y, mesh_info,
                  bitwidth=256, pipeline_delay=4,
                  num_ports=5, num_vcs=2, buffer_capacity=4, frequency=1000):
-        super().__init__(engine, name, mesh_info, 4, buffer_capacity, frequency, stage_capacity=None)
+        super().__init__(engine, name, mesh_info, 4, buffer_capacity, frequency)
         self.x = mesh_x
         self.y = mesh_y
         self.bitwidth = bitwidth
