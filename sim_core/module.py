@@ -1,4 +1,36 @@
 from .event import Event
+import collections.abc
+import copy
+
+
+def _nested_list_of_lists(shape, maxlen=None):
+    if not shape:
+        return []
+    if len(shape) == 1:
+        return [collections.deque(maxlen=maxlen) for _ in range(shape[0])]
+    return [_nested_list_of_lists(shape[1:], maxlen) for _ in range(shape[0])]
+
+
+def _get_from_nested_list(nested_list, indices):
+    for index in indices:
+        nested_list = nested_list[index]
+    return nested_list
+
+
+def _is_nested_list_empty(nested_list):
+    if not isinstance(nested_list, list):
+        return False  # A non-list item means the container is not empty
+    if not nested_list:
+        return True
+    return all(_is_nested_list_empty(item) for item in nested_list)
+
+
+def _is_any_deque_not_empty(nested_list):
+    if isinstance(nested_list, collections.deque):
+        return bool(nested_list)
+    if isinstance(nested_list, list):
+        return any(_is_any_deque_not_empty(item) for item in nested_list)
+    return False
 
 
 class HardwareModule:
@@ -10,7 +42,6 @@ class HardwareModule:
         self.buffer_occupancy = 0
         self.frequency = frequency  # MHz
 
-    # Credit based buffer bookkeeping
     def _reserve_slot(self, event=None):
         if self.buffer_occupancy >= self.buffer_capacity:
             return False
@@ -40,7 +71,8 @@ class HardwareModule:
                 )
             self.handle_event(event)
         finally:
-            self._release_slot(event)
+            if not isinstance(self, PipelineModule):
+                self._release_slot(event)
 
     def handle_event(self, event):
         if event.event_type == "RETRY_SEND":
@@ -49,9 +81,6 @@ class HardwareModule:
 
     def send_event(self, event):
         if not event.dst._reserve_slot(event):
-            # Destination buffer full; stall and retry next cycle
-            if hasattr(self, "set_stall"):
-                self.set_stall(1)
             retry = Event(
                 src=self,
                 dst=self,
@@ -65,87 +94,109 @@ class HardwareModule:
 
 
 class PipelineModule(HardwareModule):
-    """Base class for modules with event driven pipelined execution."""
-
-    def __init__(self, engine, name, mesh_info, num_stages, buffer_capacity=4, frequency=1000):
+    def __init__(
+        self, engine, name, mesh_info, num_stages, buffer_shapes, buffer_capacity=4, frequency=1000
+    ):
         super().__init__(engine, name, mesh_info, buffer_capacity, frequency)
+        if len(buffer_shapes) != num_stages + 1:
+            raise ValueError("buffer_shapes length must be num_stages + 1")
+
         self.num_stages = num_stages
-        self.stage_funcs = [lambda m, d: (d, i + 1, False) for i in range(num_stages)]
-        self.stage_queues = [list() for _ in range(num_stages)]
-        self.stage_scheduled = [False for _ in range(num_stages)]
-        self.stage_capacity = buffer_capacity
+        self.stage_funcs = [lambda: None for _ in range(num_stages)]  # Stage funcs now take no args
+        self.stage_buffers = [_nested_list_of_lists(shape, buffer_capacity) for shape in buffer_shapes]
+        self.buffer_shapes = buffer_shapes
+        self.pipeline_scheduled = False
 
     def set_stage_funcs(self, funcs):
         if len(funcs) != self.num_stages:
             raise ValueError("stage_funcs length must match num_stages")
         self.stage_funcs = funcs
 
-    def add_data(self, data, stage_idx=0):
-        if stage_idx >= self.num_stages:
-            raise ValueError("stage_idx out of range")
-        self.stage_queues[stage_idx].append(data)
-        self._schedule_stage(stage_idx)
+    def add_data(self, data, indices=None):
+        indices = indices or []
+        input_buffer = _get_from_nested_list(self.stage_buffers[0], indices)
+        if len(input_buffer) < self.buffer_capacity:
+            input_buffer.append(data)
+            self._reserve_slot()  # Manually increment occupancy
+            self._schedule_pipeline()
+            return True
+        return False
 
-    def _schedule_stage(self, idx):
-        if not self.stage_scheduled[idx]:
+    def _schedule_pipeline(self):
+        if not self.pipeline_scheduled:
             evt = Event(
                 src=self,
                 dst=self,
                 cycle=self.engine.current_cycle + 1,
-                event_type="PIPE_STAGE",
-                payload={"stage_idx": idx},
-                priority=-idx,
+                event_type="PIPELINE_TICK",
             )
-            self.send_event(evt)
-            self.stage_scheduled[idx] = True
+            self.engine.push_event(evt)
+            self.pipeline_scheduled = True
 
     def handle_event(self, event):
-        if event.event_type == "PIPE_STAGE":
-            idx = event.payload["stage_idx"]
-            self.stage_scheduled[idx] = False
-            self._on_stage_execute(idx)
-            self._execute_stage(idx)
+        if event.event_type == "PIPELINE_TICK":
+            self.pipeline_scheduled = False
+            self._large_pipeline_func()
         else:
             super().handle_event(event)
 
-    def set_stall(self, cycles):
-        # Backwards compatibility for send_event based stalling.
-        pass
+    def _large_pipeline_func(self):
+        self.engine.logger.log(f"Module {self.name}: Cycle {self.engine.current_cycle} - Starting _large_pipeline_func")
+        if hasattr(self, 'credit_counts'):
+            self.engine.logger.log(f"Module {self.name}: Current credit_counts: {self.credit_counts}")
+        for i, buf in enumerate(self.stage_buffers):
+            self.engine.logger.log(f"Module {self.name}: Stage {i} buffer: {buf}")
 
-    def _on_stage_execute(self, idx):
-        """Hook called before processing a stage."""
-        pass
+        # Iterate stages in reverse order to propagate backpressure
+        for stage_idx in range(self.num_stages - 1, -1, -1):
+            # Each stage function will now directly process its input buffer
+            # and move data to the next stage's input buffer if not stalled.
+            self.stage_funcs[stage_idx]()
 
-    def _execute_stage(self, idx):
-        if not self.stage_queues[idx]:
-            return
-        data = self.stage_queues[idx][0]
-        func = self.stage_funcs[idx]
-        out_data, next_stage, do_stall = func(self, data)
-        if do_stall:
-            self._schedule_stage(idx)
-            return
+        # Handle pipeline output from the last stage buffer
+        output_buffer = self.stage_buffers[self.num_stages]
+        if not _is_nested_list_empty(output_buffer):
+            self._handle_output_recursive(output_buffer)
 
-        if (
-            next_stage < self.num_stages
-            and len(self.stage_queues[next_stage]) >= self.stage_capacity
-        ):
-            # downstream stage full - retry later
-            self._schedule_stage(idx)
-            return
+        # Check if any data is left in any stage buffer (excluding the final output buffer)
+        data_left = False
+        for i in range(self.num_stages):  # Check all stage input buffers
+            if not _is_nested_list_empty(self.stage_buffers[i]):
+                data_left = True
+                break
 
-        self.stage_queues[idx].pop(0)
+        if data_left:
+            self._schedule_pipeline()
 
-        if next_stage >= self.num_stages:
-            self.handle_pipeline_output(out_data)
-        else:
-            self.stage_queues[next_stage].append(out_data)
-            self._schedule_stage(next_stage)
-
-        if self.stage_queues[idx]:
-            self._schedule_stage(idx)
+    def _handle_output_recursive(self, output_buffer):
+        if isinstance(output_buffer, collections.deque): # Base case: it's a deque
+            while output_buffer:
+                item = output_buffer.popleft()
+                self.handle_pipeline_output(item)
+                self._release_slot()
+        elif isinstance(output_buffer, list): # Recursive case: it's a list of nested buffers
+            for sub_buffer in output_buffer:
+                self._handle_output_recursive(sub_buffer)
 
     def handle_pipeline_output(self, data):
         pass
 
+    def _reserve_slot(self, event=None):
+        # Override default behavior, as add_data handles capacity check.
+        # This is just for incrementing the occupancy counter.
+        if self.buffer_occupancy >= self.buffer_capacity:
+            return False  # Should not happen if add_data is used correctly
+        self.buffer_occupancy += 1
+        return True
 
+    def can_accept_event(self, event=None):
+        # This check is now effectively managed by add_data.
+        # We can make it more accurate by checking the input buffer specifically.
+        def count_items(nested_list):
+            count = 0
+            if isinstance(nested_list, list):
+                for item in nested_list:
+                    count += count_items(item) if isinstance(item, list) else 1
+            return count
+
+        return count_items(self.stage_buffers[0]) < self.buffer_capacity

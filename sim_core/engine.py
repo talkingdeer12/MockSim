@@ -1,5 +1,6 @@
 import heapq
 import math
+from sim_core.logger import EventLogger
 
 class SimulatorEngine:
     def __init__(self):
@@ -10,7 +11,7 @@ class SimulatorEngine:
         self.module_freqs = {}
         self.module_times = {}
         self.module_cycles = {}
-        self.logger = None
+        self.logger = EventLogger() # Initialize logger here
         self._order = 0
     
     def register_module(self, module):

@@ -35,6 +35,7 @@ class TrafficGenerator(HardwareModule):
                              cycle=self.engine.current_cycle,
                              data_size=1, event_type="PACKET",
                              payload=payload)
+                pkt.payload["id"] = f"{self.name}_pkt_{self.sent}"
                 self.send_event(pkt)
                 self.sent += 1
             if self.sent < self.num_packets:
@@ -45,5 +46,6 @@ class TrafficGenerator(HardwareModule):
             latency = self.engine.current_cycle - event.payload.get("start_cycle", 0)
             self.latencies.append(latency)
             self.received += 1
+            self.engine.logger.log(f"TrafficGenerator {self.name}: Received packet {event.payload.get('id')}. Total received: {self.received}")
         else:
             super().handle_event(event)
