@@ -67,26 +67,13 @@ class HardwareModule:
 class PipelineModule(HardwareModule):
     """Base class for modules with event driven pipelined execution."""
 
-    _DEFAULT_STAGE = object()
-
-    def __init__(
-        self,
-        engine,
-        name,
-        mesh_info,
-        num_stages,
-        buffer_capacity=4,
-        frequency=1000,
-        stage_capacity=_DEFAULT_STAGE,
-    ):
+    def __init__(self, engine, name, mesh_info, num_stages, buffer_capacity=4, frequency=1000):
         super().__init__(engine, name, mesh_info, buffer_capacity, frequency)
         self.num_stages = num_stages
         self.stage_funcs = [lambda m, d: (d, i + 1, False) for i in range(num_stages)]
         self.stage_queues = [list() for _ in range(num_stages)]
         self.stage_scheduled = [False for _ in range(num_stages)]
-        if stage_capacity is PipelineModule._DEFAULT_STAGE:
-            stage_capacity = buffer_capacity
-        self.stage_capacity = stage_capacity
+        self.stage_capacity = buffer_capacity
 
     def set_stage_funcs(self, funcs):
         if len(funcs) != self.num_stages:
@@ -140,8 +127,7 @@ class PipelineModule(HardwareModule):
             return
 
         if (
-            self.stage_capacity is not None
-            and next_stage < self.num_stages
+            next_stage < self.num_stages
             and len(self.stage_queues[next_stage]) >= self.stage_capacity
         ):
             # downstream stage full - retry later
