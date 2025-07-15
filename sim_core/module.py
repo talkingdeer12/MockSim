@@ -160,10 +160,11 @@ class PipelineModule(HardwareModule):
 
         # Check if any data is left in any stage buffer (excluding the final output buffer)
         data_left = False
+
         for i in range(self.num_stages):  # Check all stage input buffers
-            if not _is_nested_list_empty(self.stage_buffers[i]):
-                data_left = True
-                break
+           if _is_any_deque_not_empty(self.stage_buffers[i]):
+               data_left = True
+               break
 
         if data_left:
             self._schedule_pipeline()
