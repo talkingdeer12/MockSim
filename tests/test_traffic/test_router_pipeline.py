@@ -1,4 +1,6 @@
 import unittest
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from sim_core.engine import SimulatorEngine
 from sim_core.mesh import create_mesh
 from sim_core.router import Router
@@ -6,10 +8,10 @@ from tests.test_traffic.traffic_gen import TrafficGenerator
 
 class TestRouterPipeline(unittest.TestCase):
     def test_packet_delivery_and_credit_management(self):
-        x_dim = 2
-        y_dim = 2
-        packets_per_node = 5
-        max_tick = 10000
+        x_dim = 4
+        y_dim = 4
+        packets_per_node = 1024
+        max_tick = -1
         buffer_capacity = 8 # Increased buffer to reduce stalling
 
         engine = SimulatorEngine()
@@ -28,7 +30,7 @@ class TestRouterPipeline(unittest.TestCase):
             for cy in range(y_dim):
                 router = mesh[(cx, cy)]
                 name = f"TG_{cx}_{cy}"
-                tg = TrafficGenerator(engine, name, mesh_info, (cx, cy), packets_per_node)
+                tg = TrafficGenerator(engine, name, mesh_info, (cx, cy), packets_per_node, buffer_capacity)
                 router.attach_module(tg)
                 engine.register_module(tg)
                 tg.start()

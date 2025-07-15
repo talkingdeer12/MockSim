@@ -57,7 +57,7 @@ class SimulatorEngine:
         while self.event_queue:
             self.tick()
             tick_count += 1
-            if max_tick and tick_count >= max_tick:
+            if max_tick != -1 and tick_count >= max_tick:
                 print(f"[Engine] 최대 {max_tick} tick 도달, 강제 종료")
                 break
         print(f"[Engine] 모든 이벤트 처리 완료, 총 tick: {tick_count}")

@@ -53,6 +53,8 @@ class Router(PipelineModule):
             self._stage_sa, # Stage 2
             self._stage_st  # Stage 3
         ])
+    def _reserve_slot(self, event=None):
+        return True
 
     def set_neighbors(self, neighbor_dict):
         for d, n in neighbor_dict.items():
