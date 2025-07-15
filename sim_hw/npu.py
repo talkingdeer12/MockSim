@@ -3,7 +3,9 @@ from sim_core.event import Event
 
 class NPU(PipelineModule):
     def __init__(self, engine, name, mesh_info, pipeline_stages=5, buffer_capacity=4, txn_bytes=128, frequency=1000):
-        super().__init__(engine, name, mesh_info, pipeline_stages, buffer_capacity, frequency)
+        buffer_shapes = [[] for _ in range(pipeline_stages + 1)]
+        super().__init__(engine, name, mesh_info, num_stages=pipeline_stages, buffer_shapes=buffer_shapes, buffer_capacity=buffer_capacity, frequency=frequency)
+        self.credit_counts = buffer_capacity
         # Track per-task DMA activity
         self.expected_dma_reads = {}
         self.received_dma_reads = {}
@@ -30,8 +32,12 @@ class NPU(PipelineModule):
         self.txn_bytes = txn_bytes
 
     def _make_stage_func(self, idx):
-        def func(mod, data):
-            return data, idx + 1, False
+        def func():
+            # Moves one item from stage_buffers[idx] to stage_buffers[idx+1]
+            input_buffer = self.stage_buffers[idx]
+            output_buffer = self.stage_buffers[idx+1]
+            if input_buffer and len(output_buffer) < self.buffer_capacity:
+                output_buffer.append(input_buffer.popleft())
         return func
 
     def _on_stage_execute(self, idx):
@@ -46,7 +52,7 @@ class NPU(PipelineModule):
         info = self.cmd_queue.pop(0)
         self.current_cmd = {"info": info, "remaining": info["cycles"]}
         for _ in range(info["cycles"]):
-            self.add_data({}, stage_idx=0)
+            self.add_data({})
 
     def register_handler(self, evt_type, fn):
         """Register an event handler function for ``evt_type``."""
@@ -58,6 +64,7 @@ class NPU(PipelineModule):
         self.register_handler("NPU_CMD", self._handle_npu_cmd)
         self.register_handler("NPU_DMA_OUT", self._handle_npu_dma_out)
         self.register_handler("WRITE_REPLY", self._handle_write_reply)
+        self.register_handler("RECV_CRED", self._handle_recv_credit)
 
     def handle_pipeline_output(self, data):
         """Called when a pipeline token exits the final stage."""
@@ -99,10 +106,27 @@ class NPU(PipelineModule):
         else:
             super().handle_event(event)
 
+    def _handle_recv_credit(self, event):
+        self.credit_counts += 1
+        self.engine.logger.log(
+            f"NPU {self.name}: Received credit. New credit count: {self.credit_counts}"
+        )
+
     # ------------------------------------------------------------------
     # Individual event handlers
 
     def _handle_npu_dma_in(self, event):
+        cred_evt = Event(
+            src=self,
+            dst=event.src,
+            cycle=self.engine.current_cycle + 1,
+            event_type="RECV_CRED",
+            payload={
+                "prev_out_port": event.payload.get("prev_out_port"),
+                "prev_out_vc": event.payload.get("prev_out_vc"),
+            },
+        )
+        self.engine.push_event(cred_evt)
         key = (event.program, event.payload.get("stream_id"))
         total_bytes = event.payload["data_size"]
         self.expected_dma_reads[key] = total_bytes
@@ -135,6 +159,7 @@ class NPU(PipelineModule):
                 },
             )
             self.send_event(read_evt)
+        self._release_slot()
 
     def _handle_dma_read_reply(self, event):
         key = (event.program, event.payload.get("stream_id"))
@@ -165,8 +190,22 @@ class NPU(PipelineModule):
             self.send_event(done_evt)
             del self.expected_dma_reads[key]
             del self.received_dma_reads[key]
+            del self.requester_name_by_prog[key]
+        self._release_slot()
 
     def _handle_npu_cmd(self, event):
+        cred_evt = Event(
+            src=self,
+            dst=event.src,
+            cycle=self.engine.current_cycle + 1,
+            event_type="RECV_CRED",
+            payload={
+                "prev_out_port": event.payload.get("prev_out_port"),
+                "prev_out_vc": event.payload.get("prev_out_vc"),
+            },
+        )
+        self.engine.push_event(cred_evt)
+
         cmd = {
             "program": event.program,
             "stream_id": event.payload.get("stream_id"),
@@ -176,8 +215,21 @@ class NPU(PipelineModule):
         self.cmd_queue.append(cmd)
         self.requester_name_by_prog[(event.program, cmd["stream_id"])] = cmd["dst_name"]
         self._start_next_cmd()
+        self._release_slot()
 
     def _handle_npu_dma_out(self, event):
+        cred_evt = Event(
+            src=self,
+            dst=event.src,
+            cycle=self.engine.current_cycle + 1,
+            event_type="RECV_CRED",
+            payload={
+                "prev_out_port": event.payload.get("prev_out_port"),
+                "prev_out_vc": event.payload.get("prev_out_vc"),
+            },
+        )
+        self.engine.push_event(cred_evt)
+
         key = (event.program, event.payload.get("stream_id"))
         total_bytes = event.payload["data_size"]
         self.expected_dma_writes[key] = total_bytes
@@ -209,6 +261,7 @@ class NPU(PipelineModule):
                 },
             )
             self.send_event(wr_evt)
+        self._release_slot()
 
     def _handle_write_reply(self, event):
         key = (event.program, event.payload.get("stream_id"))
@@ -239,6 +292,22 @@ class NPU(PipelineModule):
             self.send_event(done_evt)
             del self.expected_dma_writes[key]
             del self.received_dma_writes[key]
+            del self.requester_name_by_prog[key]
+        self._release_slot()
+
+    def send_event(self, event):
+        if self.credit_counts > 0:
+            self.credit_counts -= 1
+            self.engine.push_event(event)
+        else:
+            retry = Event(
+                src=self,
+                dst=self,
+                cycle=self.engine.current_cycle + 1,
+                event_type="RETRY_SEND",
+                payload={"event": event},
+            )
+            self.engine.push_event(retry)
 
     def get_my_router(self):
         coords = self.mesh_info["npu_coords"][self.name]

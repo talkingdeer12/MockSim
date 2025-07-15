@@ -41,7 +41,7 @@ class Router(PipelineModule):
 
         # Arbitration state
         self.va_lrg_counters = [0] * self.num_ports # Input port
-        self.va_out_vc_lrg_counters = [[0] * self.num_vcs for _ in range(self.num_ports)] # Output port x Output VC
+        self.va_out_vc_lrg_counters = [0] * self.num_ports # Output port
         self.sa_lrg_counters = [0] * num_ports # Output port
 
         self.attached_module = None
@@ -69,19 +69,21 @@ class Router(PipelineModule):
         self.engine.logger.log(f"Router {self.name}: Attached module {mod.name} on LOCAL port.")
 
     def handle_event(self, event):
-        if event.event_type == "RECV_CRED":
-            port = event.payload.get("prev_out_port", 0)
-            vc = event.payload.get("prev_out_vc", 0)
-            self.credit_counts[port][vc] += 1
-            self.engine.logger.log(
-                f"Router {self.name}: Received credit for port {port}, vc {vc}. New count: {self.credit_counts[port][vc]}"
-            )
-            return # No _release_slot for credit events
+        event_types_to_route = {
+            "PACKET", "NPU_DMA_IN", "NPU_CMD", "NPU_DMA_OUT",
+            "DMA_READ", "DMA_WRITE", "WRITE_REPLY", "DMA_READ_REPLY",
+            "NPU_DMA_IN_DONE", "NPU_CMD_DONE", "NPU_DMA_OUT_DONE"
+        }
 
-        # For incoming packets, add to RC input buffer
-        if event.event_type == "PACKET":
+        if event.event_type in event_types_to_route:
             in_port = event.payload.get("input_port", 0)
             in_vc = event.payload.get("input_vc", 0)
+
+            # If packet is from an attached module, set credit return info
+            if event.src == self.attached_module:
+                event.payload["prev_out_port"] = in_port
+                event.payload["prev_out_vc"] = in_vc
+
             # Store upstream port and VC for credit return
             event.payload["last_hop_src"] = event.src
 
@@ -90,19 +92,28 @@ class Router(PipelineModule):
                 # If buffer is full, retry next cycle
                 retry = Event(src=self, dst=self, cycle=self.engine.current_cycle + 1, event_type="RETRY_SEND", payload={"event": event})
                 self.engine.push_event(retry)
-            self.engine.logger.log(f"Router {self.name}: Received packet {event.payload.get('id')} on port {in_port}, vc {in_vc}")
+            self.engine.logger.log(f"Router {self.name}: Received packet {event.payload.get('id', event.event_type)} on port {in_port}, vc {in_vc}")
+        elif event.event_type == "RECV_CRED":
+            port = event.payload.get("prev_out_port", 0)
+            vc = event.payload.get("prev_out_vc", 0)
+            self.credit_counts[port][vc] += 1
+            self.engine.logger.log(
+                f"Router {self.name}: Received credit for port {port}, vc {vc}. New count: {self.credit_counts[port][vc]}"
+            )
+            self._schedule_pipeline() # Schedule pipeline to process stalled packets
+            return # No _release_slot for credit events
         else:
-            super().handle_event(event) # Let PipelineModule handle PIPELINE_TICK and RETRY_SEND
+            super().handle_event(event)
 
     def _stage_rc(self):
         # RC stage processes packets from stage_buffers[0] (RC input)
         # and tries to move them to stage_buffers[1] (VA input)
         for in_port_idx in range(self.num_ports):
-            for in_vc_idx in range(self.num_vcs):
+            for in_vc_idx in range(self.port_num_vcs[in_port_idx]):
                 rc_input_buffer = self.stage_buffers[0][in_port_idx][in_vc_idx]
                 if rc_input_buffer:
                     pkt = rc_input_buffer[0]  # Peek at the head of the queue
-                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - RC - Processing packet {pkt.payload.get('id')} from in_port {in_port_idx}, in_vc {in_vc_idx}")
+                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - RC - Processing packet {pkt.payload.get('id', pkt.event_type)} from in_port {in_port_idx}, in_vc {in_vc_idx}")
 
                     dst_coords = pkt.payload.get("dst_coords")
                     if (self.x, self.y) == tuple(dst_coords):
@@ -127,9 +138,9 @@ class Router(PipelineModule):
                         # Not stalled, move packet to next stage
                         rc_input_buffer.popleft()
                         va_input_buffer.append(pkt)
-                        self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - RC - Moved packet {pkt.payload.get('id')} to VA input buffer. out_port: {out_port}")
+                        self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - RC - Moved packet {pkt.payload.get('id', pkt.event_type)} to VA input buffer. out_port: {out_port}")
                     else:
-                        self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - RC - Stalled packet {pkt.payload.get('id')}, VA input buffer full. Current VA buffer occupancy: {len(va_input_buffer)}/{self.buffer_capacity}")
+                        self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - RC - Stalled packet {pkt.payload.get('id', pkt.event_type)}, VA input buffer full. Current VA buffer occupancy: {len(va_input_buffer)}/{self.buffer_capacity}")
                     # Else: stalled, packet remains in RC input buffer for next cycle
 
     def _stage_va(self):
@@ -142,12 +153,12 @@ class Router(PipelineModule):
         va_candidates = collections.defaultdict(list)  # Key: (out_port), Value: list of (in_port_idx, in_vc_idx)
 
         for in_port_idx in range(self.num_ports):
-            for in_vc_idx in range(self.num_vcs):
+            for in_vc_idx in range(self.port_num_vcs[in_port_idx]):
                 va_input_buffer = self.stage_buffers[1][in_port_idx][in_vc_idx]
                 if va_input_buffer:
                     pkt = va_input_buffer[0]
                     out_port = pkt.payload["out_port"]
-                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Processing packet {pkt.payload.get('id')} from in_port {in_port_idx}, in_vc {in_vc_idx} for out_port {out_port}")
+                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Processing packet {pkt.payload.get('id', pkt.event_type)} from in_port {in_port_idx}, in_vc {in_vc_idx} for out_port {out_port}")
 
                     # Check if credit is available for any VC on the chosen output port
                     # Only consider VCs that have credit > 0
@@ -160,7 +171,7 @@ class Router(PipelineModule):
                     if available_vcs_for_out_port:
                         va_candidates[out_port].append((in_port_idx, in_vc_idx))
                     else:
-                        self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Stalled packet {pkt.payload.get('id')}, no credit available for out_port {out_port}. Current credits: {self.credit_counts[out_port]}")
+                        self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Stalled packet {pkt.payload.get('id', pkt.event_type)}, no credit available for out_port {out_port}. Current credits: {self.credit_counts[out_port]}")
 
         # Perform VA arbitration for each output port
         for out_port, candidates_list in va_candidates.items():
@@ -194,37 +205,30 @@ class Router(PipelineModule):
 
                     if available_out_vcs:
                         # LRG arbitration for output VCs
-                        # Find the ovc with the lowest counter value
-                        min_counter = float('inf')
-                        chosen_out_vc = None
-                        for ovc_candidate in available_out_vcs:
-                            if self.va_out_vc_lrg_counters[out_port][ovc_candidate] < min_counter:
-                                min_counter = self.va_out_vc_lrg_counters[out_port][ovc_candidate]
-                                chosen_out_vc = ovc_candidate
-                        
+                        chosen_out_vc, self.va_out_vc_lrg_counters[out_port] = _arbitrate_lrg(
+                            set(available_out_vcs), self.va_out_vc_lrg_counters[out_port]
+                        )
+
                         if chosen_out_vc is not None:
-                            # Increment the counter for the chosen_out_vc
-                            self.va_out_vc_lrg_counters[out_port][chosen_out_vc] += 1
-                            
                             va_winners_for_out_port.append(
                                 (in_port_idx, winner_in_vc, chosen_out_vc)
                             )
                             pkt.payload["out_vc"] = chosen_out_vc
                             pkt.payload["va_granted"] = True  # Mark as VA granted
-                            self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Granted out_vc {chosen_out_vc} for packet {pkt.payload.get('id')}. Current credits: {self.credit_counts[out_port]}")
+                            self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Granted out_vc {chosen_out_vc} for packet {pkt.payload.get('id', pkt.event_type)}. Current credits: {self.credit_counts[out_port]}")
                         else:
                             pkt.payload["va_granted"] = False  # No output VC granted
-                            self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - No output VC granted for packet {pkt.payload.get('id')}. Available VCs: {available_out_vcs}")
+                            self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - No output VC granted for packet {pkt.payload.get('id', pkt.event_type)}. Available VCs: {available_out_vcs}")
                     else:
                         pkt.payload["va_granted"] = False  # No output VC available
-                        self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - No available output VCs for packet {pkt.payload.get('id')}. Current credits: {self.credit_counts[out_port]}")
+                        self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - No available output VCs for packet {pkt.payload.get('id', pkt.event_type)}. Current credits: {self.credit_counts[out_port]}")
                 else:
                     pkt.payload["va_granted"] = False  # No input VC granted
-                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - No winner_in_vc for packet {pkt.payload.get('id')}. Candidates: {in_vcs_for_this_in_port}")
+                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - No winner_in_vc for packet {pkt.payload.get('id', pkt.event_type)}. Candidates: {in_vcs_for_this_in_port}")
 
         # Now, process the winners and move packets to SA stage
         for in_port_idx in range(self.num_ports):
-            for in_vc_idx in range(self.num_vcs):
+            for in_vc_idx in range(self.port_num_vcs[in_port_idx]):
                 va_input_buffer = self.stage_buffers[1][in_port_idx][in_vc_idx]
                 if va_input_buffer:
                     pkt = va_input_buffer[0]
@@ -239,9 +243,9 @@ class Router(PipelineModule):
                             va_input_buffer.popleft()
                             sa_input_buffer.append(pkt)
                             self.credit_counts[out_port][chosen_out_vc] -= 1  # Consume credit
-                            self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Moved packet {pkt.payload.get('id')} to SA input buffer. Consumed credit for out_port {out_port}, out_vc {chosen_out_vc}. New credit: {self.credit_counts[out_port][chosen_out_vc]}")
+                            self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Moved packet {pkt.payload.get('id', pkt.event_type)} to SA input buffer. Consumed credit for out_port {out_port}, out_vc {chosen_out_vc}. New credit: {self.credit_counts[out_port][chosen_out_vc]}")
                         else:
-                            self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Stalled packet {pkt.payload.get('id')}, SA input buffer full. Current SA buffer occupancy: {len(sa_input_buffer)}/{self.buffer_capacity}")
+                            self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - VA - Stalled packet {pkt.payload.get('id', pkt.event_type)}, SA input buffer full. Current SA buffer occupancy: {len(sa_input_buffer)}/{self.buffer_capacity}")
                     # Else: not VA granted, packet remains in VA input buffer for next cycle
                     pkt.payload["va_granted"] = False  # Reset for next cycle
 
@@ -254,12 +258,12 @@ class Router(PipelineModule):
         sa_candidates = collections.defaultdict(list)  # Key: out_port, Value: list of (in_port_idx, in_vc_idx)
 
         for in_port_idx in range(self.num_ports):
-            for in_vc_idx in range(self.num_vcs):
+            for in_vc_idx in range(self.port_num_vcs[in_port_idx]):
                 sa_input_buffer = self.stage_buffers[2][in_port_idx][in_vc_idx]
                 if sa_input_buffer:
                     pkt = sa_input_buffer[0]
                     out_port = pkt.payload["out_port"]
-                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - SA - Processing packet {pkt.payload.get('id')} from in_port {in_port_idx}, in_vc {in_vc_idx} for out_port {out_port}")
+                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - SA - Processing packet {pkt.payload.get('id', pkt.event_type)} from in_port {in_port_idx}, in_vc {in_vc_idx} for out_port {out_port}")
                     sa_candidates[out_port].append((in_port_idx, in_vc_idx))
 
         sa_winners = {}  # Key: out_port, Value: (in_port_idx, in_vc_idx)
@@ -286,9 +290,9 @@ class Router(PipelineModule):
                 # Not stalled, move packet to next stage
                 sa_input_buffer.popleft()
                 st_input_buffer.append(pkt)
-                self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - SA - Moved packet {pkt.payload.get('id')} to ST input buffer.")
+                self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - SA - Moved packet {pkt.payload.get('id', pkt.event_type)} to ST input buffer.")
             else:
-                self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - SA - Stalled packet {pkt.payload.get('id')}, ST input buffer full. Current ST buffer occupancy: {len(st_input_buffer)}/{self.buffer_capacity}")
+                self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - SA - Stalled packet {pkt.payload.get('id', pkt.event_type)}, ST input buffer full. Current ST buffer occupancy: {len(st_input_buffer)}/{self.buffer_capacity}")
             # Else: stalled, packet remains in SA input buffer for next cycle
 
     def _stage_st(self):
@@ -299,30 +303,34 @@ class Router(PipelineModule):
             st_input_buffer = self.stage_buffers[3][out_port]
             if st_input_buffer:
                 pkt = st_input_buffer[0]  # Peek at the head of the queue
-                self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - ST - Processing packet {pkt.payload.get('id')} for out_port {out_port}")
+                self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - ST - Processing packet {pkt.payload.get('id', pkt.event_type)} for out_port {out_port}")
 
                 dest_mod, dest_port = self.output_links[out_port]
 
                 # Update payload for the next hop
                 pkt.payload["input_port"] = dest_port
                 pkt.payload["input_vc"] = pkt.payload.get("out_vc", 0)
+                
                 # Prepare credit info for upstream router before updating for next hop
-                prev_out_port = pkt.payload.get("prev_out_port", 0)
-                prev_out_vc = pkt.payload.get("prev_out_vc", 0)
+                prev_out_port = pkt.payload.get("prev_out_port")
+                prev_out_vc = pkt.payload.get("prev_out_vc")
 
                 # Send the packet
                 new_event = Event(
                     src=self,
                     dst=dest_mod,
                     cycle=self.engine.current_cycle + 1,
+                    data_size=pkt.data_size,
+                    program=pkt.program,
                     event_type=pkt.event_type,
                     payload=pkt.payload,
+                    priority=pkt.priority,
                 )
 
                 st_input_buffer.popleft()  # Packet leaves the router
                 self.send_event(new_event)
                 self.engine.logger.log(
-                    f"Router {self.name}: Cycle {self.engine.current_cycle} - ST - Sent packet {pkt.payload.get('id')} to {dest_mod.name} via port {out_port}"
+                    f"Router {self.name}: Cycle {self.engine.current_cycle} - ST - Sent packet {pkt.payload.get('id', pkt.event_type)} to {dest_mod.name} via port {out_port}"
                 )
 
                 # Return credit to upstream router

@@ -5,6 +5,7 @@ from sim_core.event import Event
 class ControlProcessor(HardwareModule):
     def __init__(self, engine, name, mesh_info, npus=None, buffer_capacity=4, frequency=1000):
         super().__init__(engine, name, mesh_info, buffer_capacity, frequency)
+        self.credit_counts = buffer_capacity
         self.npus = npus or []
         # Control programs manage only NPUs.
         self.active_npu_programs = {}
@@ -48,7 +49,6 @@ class ControlProcessor(HardwareModule):
                 and entry["status"] == "issued"
             ):
                 entry["status"] = "done"
-                break
         # Advance commit pointer
         while (
             board["commit"] < len(board["entries"])
@@ -218,6 +218,13 @@ class ControlProcessor(HardwareModule):
         self.register_handler("NPU_DMA_IN_DONE", self._handle_npu_dma_in_done)
         self.register_handler("NPU_CMD_DONE", self._handle_npu_cmd_done)
         self.register_handler("NPU_DMA_OUT_DONE", self._handle_npu_dma_out_done)
+        self.register_handler("RECV_CRED", self._handle_recv_credit)
+
+    def _handle_recv_credit(self, event):
+        self.credit_counts += 1
+        self.engine.logger.log(
+            f"ControlProcessor {self.name}: Received credit. New credit count: {self.credit_counts}"
+        )
 
     # ------------------------------------------------------------------
     # Default handlers
@@ -227,6 +234,7 @@ class ControlProcessor(HardwareModule):
         state = self.program_state.get(event.program)
         board = self.program_scoreboards.get(event.program)
         if not prog or not state or not board:
+            print(f"[CP] NPU task {event.program} 완료?")
             return
 
         # If all instructions completed, retire program
@@ -260,6 +268,7 @@ class ControlProcessor(HardwareModule):
         sid = event.payload.get("stream_id")
         prog_state.setdefault("waiting_dma_in", {})[sid] = set(n.name for n in self.npus)
         self.npu_dma_in_opcode_done[event.program] = False
+        print(f"[CP] NPU DMA IN {event.program} 시작 완료")
         for npu in self.npus:
             dma_evt = Event(
                 src=self,
@@ -341,6 +350,18 @@ class ControlProcessor(HardwareModule):
             self.send_event(out_evt)
 
     def _handle_npu_dma_in_done(self, event):
+        cred_evt = Event(
+            src=self,
+            dst=event.src,
+            cycle=self.engine.current_cycle + 1,
+            event_type="RECV_CRED",
+            payload={
+                "prev_out_port": event.payload.get("prev_out_port"),
+                "prev_out_vc": event.payload.get("prev_out_vc"),
+            },
+        )
+        self.engine.push_event(cred_evt)
+
         sid = event.payload.get("stream_id")
         print(
             f"[CP] DMA_IN_DONE stream={sid} cycle={self.engine.current_cycle}"
@@ -358,6 +379,18 @@ class ControlProcessor(HardwareModule):
         self._schedule_run(event.program)
 
     def _handle_npu_cmd_done(self, event):
+        cred_evt = Event(
+            src=self,
+            dst=event.src,
+            cycle=self.engine.current_cycle + 1,
+            event_type="RECV_CRED",
+            payload={
+                "prev_out_port": event.payload.get("prev_out_port"),
+                "prev_out_vc": event.payload.get("prev_out_vc"),
+            },
+        )
+        self.engine.push_event(cred_evt)
+
         sid = event.payload.get("stream_id")
         print(
             f"[CP] CMD_DONE stream={sid} cycle={self.engine.current_cycle}"
@@ -374,6 +407,18 @@ class ControlProcessor(HardwareModule):
         self._schedule_run(event.program)
 
     def _handle_npu_dma_out_done(self, event):
+        cred_evt = Event(
+            src=self,
+            dst=event.src,
+            cycle=self.engine.current_cycle + 1,
+            event_type="RECV_CRED",
+            payload={
+                "prev_out_port": event.payload.get("prev_out_port"),
+                "prev_out_vc": event.payload.get("prev_out_vc"),
+            },
+        )
+        self.engine.push_event(cred_evt)
+
         sid = event.payload.get("stream_id")
         print(
             f"[CP] DMA_OUT_DONE stream={sid} cycle={self.engine.current_cycle}"
@@ -396,6 +441,20 @@ class ControlProcessor(HardwareModule):
             handler(event)
         else:
             super().handle_event(event)
+
+    def send_event(self, event):
+        if self.credit_counts > 0:
+            self.credit_counts -= 1
+            self.engine.push_event(event)
+        else:
+            retry = Event(
+                src=self,
+                dst=self,
+                cycle=self.engine.current_cycle + 1,
+                event_type="RETRY_SEND",
+                payload={"event": event},
+            )
+            self.engine.push_event(retry)
 
     def get_my_router(self):
         coords = self.mesh_info["cp_coords"][self.name]

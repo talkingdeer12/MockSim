@@ -16,7 +16,8 @@ class EventLogger:
         })
 
     def log(self, message):
-        print(f"[LOG] {message}")
+        #print(f"[LOG] {message}")
+        return 
 
     def get_entries(self):
         return list(self.entries)

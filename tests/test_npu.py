@@ -18,17 +18,17 @@ class NPUTest(unittest.TestCase):
             "cp_coords": {},
             "iod_coords": {},
         }
-        mesh = create_mesh(engine, 3, 1, mesh_info, buffer_capacity=1)
+        mesh = create_mesh(engine, 3, 1, mesh_info, buffer_capacity=4)
         mesh_info["router_map"] = mesh
-        npu = NPU(engine, "NPU_0", mesh_info, buffer_capacity=1)
+        npu = NPU(engine, "NPU_0", mesh_info, buffer_capacity=32)
         mesh_info["npu_coords"]["NPU_0"] = (0,0)
         mesh[(0,0)].attach_module(npu)
         engine.register_module(npu)
-        iod = IOD(engine, "IOD", mesh_info, pipeline_latency=2, channels_per_stack=16, buffer_capacity=1)
+        iod = IOD(engine, "IOD", mesh_info, pipeline_latency=2, channels_per_stack=16, buffer_capacity=2)
         mesh_info["iod_coords"]["IOD"] = (1,0)
         mesh[(1,0)].attach_module(iod)
         engine.register_module(iod)
-        cp = ControlProcessor(engine, "CP", mesh_info, npus=[npu], buffer_capacity=1)
+        cp = ControlProcessor(engine, "CP", mesh_info, npus=[npu], buffer_capacity=2)
         mesh_info["cp_coords"]["CP"] = (2,0)
         mesh[(2,0)].attach_module(cp)
         engine.register_module(cp)

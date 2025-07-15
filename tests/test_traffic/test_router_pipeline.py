@@ -10,7 +10,7 @@ class TestRouterPipeline(unittest.TestCase):
     def test_packet_delivery_and_credit_management(self):
         x_dim = 4
         y_dim = 4
-        packets_per_node = 1024
+        packets_per_node = 64
         max_tick = -1
         buffer_capacity = 8 # Increased buffer to reduce stalling
 

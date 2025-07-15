@@ -5,7 +5,7 @@ import copy
 
 def _nested_list_of_lists(shape, maxlen=None):
     if not shape:
-        return []
+        return collections.deque(maxlen=maxlen)
     if len(shape) == 1:
         return [collections.deque(maxlen=maxlen) for _ in range(shape[0])]
     return [_nested_list_of_lists(shape[1:], maxlen) for _ in range(shape[0])]
@@ -80,17 +80,9 @@ class HardwareModule:
             self.send_event(retry_evt)
 
     def send_event(self, event):
-        if not event.dst._reserve_slot(event):
-            retry = Event(
-                src=self,
-                dst=self,
-                cycle=self.engine.current_cycle + 1,
-                event_type="RETRY_SEND",
-                payload={"event": event},
-            )
-            self.engine.push_event(retry)
-        else:
-            self.engine.push_event(event)
+        # The destination module is now responsible for handling backpressure.
+        # It should queue a RETRY_SEND event if it cannot accept the incoming event.
+        self.engine.push_event(event)
 
 
 class PipelineModule(HardwareModule):

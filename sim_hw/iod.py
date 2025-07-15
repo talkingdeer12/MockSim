@@ -65,7 +65,9 @@ class IOD(PipelineModule):
         tCL=1,
         frequency=1000,
     ):
-        super().__init__(engine, name, mesh_info, 1, buffer_capacity, frequency)
+        buffer_shapes = [[], []]
+        super().__init__(engine, name, mesh_info, num_stages=1, buffer_shapes=buffer_shapes, buffer_capacity=buffer_capacity, frequency=frequency)
+        self.credit_counts = buffer_capacity
         self.pipeline_latency = pipeline_latency
         self.num_stacks = num_stacks
         self.channels_per_stack = channels_per_stack
@@ -98,7 +100,7 @@ class IOD(PipelineModule):
                 event_type="IOD_MC",
                 payload=payload,
             )
-            self.send_event(evt)
+            self.engine.push_event(evt)
             self.mc_sched[st][ch] = True
 
     def register_handler(self, evt_type, fn):
@@ -108,6 +110,11 @@ class IOD(PipelineModule):
         self.register_handler("DMA_WRITE", self._handle_dma_access)
         self.register_handler("DMA_READ", self._handle_dma_access)
         self.register_handler("IOD_MC", self._handle_mc)
+        self.register_handler("RECV_CRED", self._handle_recv_credit)
+        self.register_handler("RETRY_SEND", self._handle_retry_send)
+
+    def _handle_retry_send(self, event):
+        self.send_event(event.payload["event"])
 
     def handle_event(self, event):
         handler = self.event_handlers.get(event.event_type)
@@ -116,7 +123,25 @@ class IOD(PipelineModule):
         else:
             super().handle_event(event)
 
+    def _handle_recv_credit(self, event):
+        self.credit_counts += 1
+        self.engine.logger.log(
+            f"IOD {self.name}: Received credit. New credit count: {self.credit_counts}"
+        )
+
     def _handle_dma_access(self, event):
+        self.engine.logger.log(f"IOD {self.name}: Received {event.event_type} from {event.src.name if event.src else 'N/A'}")
+        cred_evt = Event(
+            src=self,
+            dst=event.src,
+            cycle=self.engine.current_cycle + 1,
+            event_type="RECV_CRED",
+            payload={
+                "prev_out_port": event.payload.get("prev_out_port"),
+                "prev_out_vc": event.payload.get("prev_out_vc"),
+            },
+        )
+        self.engine.push_event(cred_evt)
         size = event.payload.get("data_size", 0)
         addr = event.payload.get("eaddr", 0)
         while size > 0:
@@ -128,7 +153,7 @@ class IOD(PipelineModule):
             op = {
                 "type": event.event_type,
                 "program": event.program,
-                "src_name": event.payload["src_name"],
+                "src_name": self.name,
                 "stream_id": event.payload.get("stream_id"),
                 "dst_name": event.payload.get("src_name") if event.payload.get("need_reply") else None,
                 "stack": st,
@@ -144,6 +169,7 @@ class IOD(PipelineModule):
     def _handle_mc(self, event):
         st = event.payload["stack"]
         ch = event.payload["channel"]
+        self.engine.logger.log(f"IOD {self.name}: Handling MC for stack {st}, channel {ch}")
         self.mc_sched[st][ch] = False
         if not self.mc_queues[st][ch]:
             return
@@ -169,6 +195,7 @@ class IOD(PipelineModule):
             self._schedule_mc(st, ch)
 
     def handle_pipeline_output(self, op):
+        self.engine.logger.log(f"IOD {self.name}: MC complete, sending reply for {op['type']}")
         if op["type"] == "DMA_WRITE":
             evt_type = "WRITE_REPLY"
         else:
@@ -198,6 +225,24 @@ class IOD(PipelineModule):
                 },
             )
             self.send_event(reply_event)
+
+    def send_event(self, event):
+        if event.dst is self:
+            self.engine.push_event(event)
+            return
+
+        if self.credit_counts > 0:
+            self.credit_counts -= 1
+            self.engine.push_event(event)
+        else:
+            retry = Event(
+                src=self,
+                dst=self,
+                cycle=self.engine.current_cycle + 1,
+                event_type="RETRY_SEND",
+                payload={"event": event},
+            )
+            self.engine.push_event(retry)
 
     def get_my_router(self):
         coords = self.mesh_info["iod_coords"][self.name]
