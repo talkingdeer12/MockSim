@@ -68,16 +68,18 @@ class Router(PipelineModule):
 
     def handle_event(self, event):
         if event.event_type == "RECV_CRED":
-            port = event.payload["port"]
-            vc = event.payload["vc"]
+            port = event.payload.get("prev_out_port", 0)
+            vc = event.payload.get("prev_out_vc", 0)
             self.credit_counts[port][vc] += 1
-            self.engine.logger.log(f"Router {self.name}: Received credit for port {port}, vc {vc}. New count: {self.credit_counts[port][vc]}")
+            self.engine.logger.log(
+                f"Router {self.name}: Received credit for port {port}, vc {vc}. New count: {self.credit_counts[port][vc]}"
+            )
             return # No _release_slot for credit events
 
         # For incoming packets, add to RC input buffer
         if event.event_type == "PACKET":
             in_port = event.payload.get("input_port", 0)
-            in_vc = event.payload.get("vc", 0)
+            in_vc = event.payload.get("input_vc", 0)
             # Store upstream port and VC for credit return
             event.payload["prev_out_port"] = in_port
             event.payload["prev_out_vc"] = in_vc
@@ -303,6 +305,10 @@ class Router(PipelineModule):
 
                 # Update payload for the next hop
                 pkt.payload["input_port"] = dest_port
+                pkt.payload["input_vc"] = pkt.payload.get("out_vc", 0)
+                # Prepare credit info for upstream router before updating for next hop
+                prev_out_port = pkt.payload.get("prev_out_port")
+                prev_out_vc = pkt.payload.get("prev_out_vc")
 
                 # Send the packet
                 new_event = Event(
@@ -313,32 +319,35 @@ class Router(PipelineModule):
                     payload=pkt.payload,
                 )
 
-                # Check if the destination can accept the event
-                if dest_mod.can_accept_event(new_event):
-                    st_input_buffer.popleft()  # Packet leaves the router
-                    self.send_event(new_event)
-                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - ST - Sent packet {pkt.payload.get('id')} to {dest_mod.name} via port {out_port}")
+                st_input_buffer.popleft()  # Packet leaves the router
+                self.send_event(new_event)
+                self.engine.logger.log(
+                    f"Router {self.name}: Cycle {self.engine.current_cycle} - ST - Sent packet {pkt.payload.get('id')} to {dest_mod.name} via port {out_port}"
+                )
 
-                    # Return credit to upstream router
-                    prev_out_port = pkt.payload.get("prev_out_port")
-                    prev_out_vc = pkt.payload.get("prev_out_vc")
+                # Return credit to upstream router
+                if prev_out_port is not None and prev_out_vc is not None:
+                    up_module = pkt.payload["last_hop_src"]
 
-                    if prev_out_port is not None and prev_out_vc is not None:
-                        up_module = pkt.payload["last_hop_src"]
+                    # Always send credit back to the upstream module, regardless of its type
+                    cred_evt = Event(
+                        src=self,
+                        dst=up_module,
+                        cycle=self.engine.current_cycle + 1,
+                        event_type="RECV_CRED",
+                        payload={"prev_out_port": prev_out_port, "prev_out_vc": prev_out_vc},
+                    )
+                    self.engine.push_event(cred_evt)
+                    self.engine.logger.log(
+                        f"Router {self.name}: Cycle {self.engine.current_cycle} - ST - Returned credit for port {prev_out_port}, vc {prev_out_vc} to {up_module.name}"
+                    )
+                # Else: no previous port/vc info; nothing to return
 
-                        # Always send credit back to the upstream module, regardless of its type
-                        cred_evt = Event(
-                            src=self,
-                            dst=up_module,
-                            cycle=self.engine.current_cycle + 1,
-                            event_type="RECV_CRED",
-                            payload={"port": prev_out_port, "vc": prev_out_vc},
-                        )
-                        self.engine.push_event(cred_evt)
-                        self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - ST - Returned credit for port {prev_out_port}, vc {prev_out_vc} to {up_module.name}")
-                else:
-                    self.engine.logger.log(f"Router {self.name}: Cycle {self.engine.current_cycle} - ST - Stalled packet {pkt.payload.get('id')}, downstream module {dest_mod.name} buffer full. Current ST buffer occupancy: {len(st_input_buffer)}/{self.buffer_capacity}")
-                # Else: stalled, packet remains in ST input buffer for next cycle
+                # Update for credit return from next hop
+                pkt.payload["prev_out_port"] = out_port
+                pkt.payload["prev_out_vc"] = pkt.payload.get("out_vc", 0)
+                pkt.payload["last_hop_src"] = self
+                self._release_slot()
 
     def handle_pipeline_output(self, data):
         # This method is called by PipelineModule when data exits the last stage (ST_out buffer)
