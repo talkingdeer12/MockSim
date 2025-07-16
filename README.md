@@ -34,6 +34,13 @@ Each module simplifies real computer architecture features:
 - **`sim_hw`** – CP, NPU, IOD and other hardware blocks.
 - **`sim_ml`** – PyTorch modules and hooks. `llama3_decoder.py` and `llama3_sim_hook.py` are included as examples.
 
+## Recent Updates
+- Engine automatically creates an `EventLogger` and `run_until_idle` accepts `max_tick=-1` for endless runs.
+- Router rewritten with a credit-based pipeline using the new `PipelineModule` design.
+- `PipelineModule` now uses nested stage buffers and a single `PIPELINE_TICK` event.
+- CP, NPU and IOD send `RECV_CRED` messages and retry with `RETRY_SEND` when credits are exhausted.
+
+
 ## Running the Example
 
 1. Install PyTorch (the CPU version is sufficient).
@@ -104,3 +111,27 @@ python -m unittest discover tests
 ```
 
 The tests cover NPU task flow, tile pipelining and random traffic. Ensure they pass after adding new functionality.
+
+## Hardware Call Sequence (Micro Level)
+
+### Control Processor
+1. `_handle_run_program` schedules `RUN_PROGRAM` events which dispatch DMA or compute instructions.
+2. `_handle_npu_dma_in`, `_handle_npu_cmd` and `_handle_npu_dma_out` send packets to the router using `send_event`.
+3. Completion events `NPU_DMA_IN_DONE`, `NPU_CMD_DONE` and `NPU_DMA_OUT_DONE` are processed by the matching handlers to update scoreboards and reschedule the program.
+
+### NPU
+1. `_handle_npu_dma_in`, `_handle_npu_cmd` and `_handle_npu_dma_out` issue memory transactions or pipeline tokens.
+2. `_handle_dma_read_reply` and `_handle_write_reply` acknowledge IOD responses.
+3. Commands flow through the internal pipeline created by `_make_stage_func`; when finished, `handle_pipeline_output` emits completion events back to the CP.
+
+### IOD
+1. `_handle_dma_access` splits transfers into per-channel operations and queues them for the memory controllers.
+2. `_schedule_mc` triggers `IOD_MC` events; `_handle_mc` decrements remaining cycles and posts results.
+3. `handle_pipeline_output` sends `DMA_READ_REPLY` or `WRITE_REPLY` to the requester.
+
+### Router
+1. `handle_event` enqueues packets into stage buffers.
+2. `_stage_rc` chooses an output port.
+3. `_stage_va` arbitrates for a virtual channel with available credit.
+4. `_stage_sa` grants switch access and moves packets to the ST buffer.
+5. `_stage_st` forwards packets to the next hop and returns credit via `RECV_CRED`.
